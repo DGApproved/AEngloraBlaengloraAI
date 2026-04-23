@@ -532,7 +532,7 @@ public class GoddessMatrix extends JFrame {
     /**
      * Resolves the API binary based on activation mode:
      *
-     *   AI alone  -> ai_system.sh / ai_system.bat
+     *   AI alone  -> GoddessAPI.sh / ai_system.bat
      *                The Python AI system (hardware profiler, intake reader,
      *                journal, dictionary, almanac, hibernate state).
      *                Searched in: script folder, then working directory root.
@@ -566,9 +566,9 @@ public class GoddessMatrix extends JFrame {
         } 
         else 
         {
-            // AI alone: ai_system.sh / ai_system.bat — Python AI system.
+            // AI alone: GoddessAPI.sh / ai_system.bat — Python AI system.
             // Searches script folder first, then working directory root.
-            String scriptName = osName.contains("win") ? "ai_system.bat" : "ai_system.sh";
+            String scriptName = osName.contains("win") ? "ai_system.bat" : "GoddessAPI.sh";
             File standard = new File(getOSScriptFolder(), scriptName);
             if (standard.exists()) 
             {
@@ -588,7 +588,7 @@ public class GoddessMatrix extends JFrame {
      * - working directory from session map
      * - HOME redirected into osDev/home
      * - PATH prefixed with osDev/bin
-     * - AI alone    : launches ai_system.sh (Python AI system) via bash
+     * - AI alone    : launches GoddessAPI.sh (Python AI system) via bash
      * - FN + AI     : launches GoddessAPI.py (direct API bridge) via python3
      * - .py files   : always launched with python3 / python, never bash
      */
@@ -622,7 +622,7 @@ public class GoddessMatrix extends JFrame {
 
                 // Build launch command based on file type.
                 // .py  -> python3 / python  (GoddessAPI.py  via FN+AI)
-                // .sh  -> bash              (ai_system.sh   via AI alone)
+                // .sh  -> bash              (GoddessAPI.sh   via AI alone)
                 // .bat -> cmd /c            (Windows)
                 // null -> fallback name     (should not occur if scripts are in place)
                 List<String> cmd = new ArrayList<>();
@@ -641,7 +641,7 @@ public class GoddessMatrix extends JFrame {
                 else 
                 {
                     cmd.add("bash");
-                    cmd.add(apiFile != null ? apiFile.getAbsolutePath() : "ai_system.sh");
+                    cmd.add(apiFile != null ? apiFile.getAbsolutePath() : "GoddessAPI.sh");
                 }
 
                 ProcessBuilder pb = new ProcessBuilder(cmd);
@@ -2001,13 +2001,13 @@ private void loadSystemProfile()
             {
                 systemProfileLine1 = "PROFILE: session_profile.txt";
                 systemProfileLine2 = "Drop profile in working directory";
-                systemProfileLine3 = "or run ai_system.sh first";
+                systemProfileLine3 = "or run GoddessAPI.sh first";
             }
         } 
         else 
         {
             systemProfileLine1 = "PROFILE: NOT FOUND";
-            systemProfileLine2 = "Run ai_system.sh to generate profile";
+            systemProfileLine2 = "Run GoddessAPI.sh to generate profile";
             systemProfileLine3 = "";
         }
     }
@@ -3718,7 +3718,7 @@ private void loadSystemProfile()
    - displayRefreshRate stored and shown live in HUD header
    - aiQueryCount incremented on ENTER in AI mode
    - videoStreamThread marked as daemon thread
-   - AI button routing: AI alone -> ai_system.sh, FN+AI -> GoddessAPI.py
+   - AI button routing: AI alone -> GoddessAPI.sh, FN+AI -> GoddessAPI.py
    - resolveAPIBinary updated to return correct script per activation mode
    - startGoddessAPI command builder: .py files launched via python3, not bash
    - Mode B avatar renderer (renderModeBFrame): stick figure + sine activity box
