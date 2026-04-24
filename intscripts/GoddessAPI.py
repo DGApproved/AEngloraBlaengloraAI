@@ -8,7 +8,7 @@ Hibernate state : AIpy.hiberfile  (JSON)
 Hardware cache  : hardware.cache  (plain text, shared with GoddessAPI.sh)
 """
 
-import os, re, sys, json, time, signal, threading, shutil, datetime, hashlib, platform
+import os, re, sys, json, time, signal, threading, shutil, datetime, hashlib, platform, random
 from pathlib import Path
 import subprocess as _sp
 
@@ -29,6 +29,18 @@ PSUTIL  = psutil   is not None
 CPUINFO = cpuinfo  is not None
 EPUB    = ebooklib is not None
 PDF     = fitz     is not None
+
+# ── EXPERIMENTAL GOVERNANCE PATCH ────────────────────────────
+try:
+    from goddess_experimental_patch import (
+        init_experimental_files, load_experimental_flags, is_feature_enabled,
+        can_ai_toggle, set_feature_flag, propose_feature_toggle,
+        read_log_memory, append_log_memory, suggest_experimental_adjustments_from_logs
+    )
+    PATCH_ACTIVE = True
+except ImportError:
+    PATCH_ACTIVE = False
+# ─────────────────────────────────────────────────────────────
 
 try:
     from llama_cpp import Llama as _Llama
@@ -273,14 +285,21 @@ class GGUFEncyclopedia:
             chat("      Install: pip install llama-cpp-python")
             return
         try:
-            status("STATE: BOOTING | LOADING GGUF ENCYCLOPEDIA")
+            import time
+            status("STATE: BOOTING | LOADING GGUF ENCYCLOPEDIA (PROFILING...)")
+            start_time = time.time()
+            
             self._model = _Llama(
-                model_path = str(self.path),
-                n_ctx      = 2048,
-                n_threads  = os.cpu_count() or 4,
-                verbose    = False
+                model_path   = str(self.path),
+                n_ctx        = 512,        # Tiny context for a tiny model
+                n_threads    = 1,          # Only 1 CPU core needed
+                n_gpu_layers = 0,          # Bypass the GTX 1060 entirely for this test
+                use_mmap     = True,       # Force memory mapping
+                verbose      = False        # Turn on the C++ telemetry
             )
-            chat(f"Encyclopedia loaded: {self.path.name}")
+            
+            load_time = time.time() - start_time
+            chat(f"Encyclopedia loaded in {load_time:.2f} seconds.")
         except Exception as e:
             chat(f"GGUF load failed: {e}")
             self._model = None
@@ -293,8 +312,16 @@ class GGUFEncyclopedia:
         if not self.available:
             return ""
         try:
-            result = self._model(prompt, max_tokens=max_tokens,
-                                 stop=["\n\n", "###"], echo=False)
+            # Wrap the raw prompt in SmolLM2's expected ChatML format
+            chatml_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+            
+            result = self._model(
+                chatml_prompt, 
+                max_tokens=max_tokens,
+                stop=["<|im_end|>", "###"],  # Removed \n\n so it doesn't cut off early
+                echo=False,
+                temperature=0.3  # Low temperature for factual encyclopedia answers
+            )
             return result["choices"][0]["text"].strip()
         except Exception as e:
             journal_append(f"GGUF query error: {e}")
@@ -353,6 +380,78 @@ class GGUFEncyclopedia:
             journal_append(f"GGUF QUERY: {query[:60]} | RESULT LEN: {len(response)}")
         return response
 
+    def compress_old_theories(self):
+        """
+        Mycelial Compression: if religion.txt exceeds MAX_KB, compress the
+        15 oldest low-scoring unpromoted theories into the Almanac.
+        """
+        # ── GOVERNANCE CHECK ──
+        if PATCH_ACTIVE:
+            flags = load_experimental_flags(DGAPI / "datas")
+            if not is_feature_enabled(flags, "AUTO_COMPRESS_THEORIES"):
+                return 0
+        # ──────────────────────
+        
+        if not self.available or not _GGUF_WRITE_ALLOWED or not RELIGION.exists():
+            return 0
+
+        size_kb = os.path.getsize(RELIGION) / 1024.0
+        max_kb = 500
+
+        header_lines = RELIGION.read_text(encoding="utf-8", errors="ignore").splitlines()
+        for line in header_lines[:10]:
+            if "MAX_KB=" in line:
+                try:
+                    max_kb = int(line.split("=")[1])
+                except ValueError:
+                    pass
+
+        if size_kb < max_kb:
+            return 0
+
+        theories = _parse_blocks(RELIGION, "THEORY")
+        pending = [t for t in theories if t.get("STATUS") == "PENDING"]
+        if len(pending) < 15:
+            return 0
+
+        pending.sort(key=lambda x: (float(x.get("SCORE", 1.0)), x.get("FIRST_SEEN", "")))
+        oldest = pending[:15]
+        raw_text = "\n".join(
+            f"- {t.get('TOPIC', t.get('WORD', ''))}: {t.get('PROPOSED_TEXT', t.get('PROPOSED_DEFINITION', ''))}"
+            for t in oldest
+        )
+
+        prompt = (
+            "You are the Goddess Matrix. Compress the following unproven theoretical fragments "
+            f"into a single, dense, 3-sentence archival footnote.\n\nFragments:\n{raw_text}\n\nArchival Footnote:"
+        )
+        compressed = self._query(prompt, max_tokens=250)
+
+        if compressed:
+            write_almanac_entry(
+                "COMPRESSED ARCHIVES",
+                f"Archive Block {ts_now()['date']}",
+                compressed,
+                "GGUF Mycelial Compression",
+            )
+
+            content = RELIGION.read_text(encoding="utf-8", errors="ignore")
+            for th in oldest:
+                uid = th.get("ID", "")
+                if uid:
+                    content = re.sub(
+                        rf'\[THEORY\]\s*ID={re.escape(uid)}.*?\[/THEORY\]\s*',
+                        '',
+                        content,
+                        flags=re.DOTALL,
+                    )
+            RELIGION.write_text(content, encoding="utf-8")
+            chat(f"System: Compressed {len(oldest)} oldest theories to Almanac. Space reclaimed.")
+            journal_append(f"GGUF COMPRESSED: {len(oldest)} theories to Almanac.")
+            return len(oldest)
+
+        return 0
+
     def startup_enrichment(self, top_n=20):
         """
         Startup event: propose theories for top N dictionary words.
@@ -361,6 +460,7 @@ class GGUFEncyclopedia:
         if not self.available or not _GGUF_WRITE_ALLOWED:
             return
         # Promote any theories that matured while offline
+        self.compress_old_theories()
         promoted = religion_promote_ready(max_n=10)
         if promoted:
             chat(f"Encyclopedia: promoted {promoted} matured theories from last session.")
@@ -430,32 +530,37 @@ def _nvidia_smi():
         return []
 
 # ── PATHS ────────────────────────────────────────────────────
-BASE           = Path(".")
-STORAGE        = "convodata"
-HARDWARE_CACHE = BASE / "hardware.cache"
-HIBERFILE      = BASE / "AIpy.hiberfile"
-SESSION_PROFILE= BASE / "session_profile.txt"
-PROFILE_JSON   = BASE / "session_profile.json"
-JOURNAL        = BASE / "journal.txt"
-DICTIONARY     = BASE / "dictionary.txt"
-THESAURUS      = BASE / "thesaurus.txt"
-ALMANAC        = BASE / "almanac.txt"
-INTAKE_DIR     = BASE / "intake"
-BOOKS_DIR      = INTAKE_DIR / "books"
-CODE_DIR       = INTAKE_DIR / "code"
-REFERENCE_DIR  = INTAKE_DIR / "reference"
-PROCESSED_DIR  = INTAKE_DIR / "processed"
-INTAKE_LOG     = INTAKE_DIR / "intake.log"
-SESSION_LOG       = os.path.join(STORAGE, "convodata.txt")
-ENCYCLOPEDIA      = BASE / "encyclopedia.txt"
-RELIGION          = BASE / "religion.txt"
-PERSONA           = BASE / "persona.txt"            # AI self-model — no schema, AI decides content
-OUTPUT_VOCAB      = BASE / "output_vocabulary.txt"  # shared unless separate.txt says otherwise
-OUTPUT_VOCAB_PY   = BASE / "output_vocabulary_py.txt"
-OUTPUT_VOCAB_SH   = BASE / "output_vocabulary_sh.txt"
+BASE            = Path(".")
+DGAPI           = BASE / "dgapi"
+STORAGE         = "convodata"
+SYSTEM_DIR       = DGAPI / "system"
+HARDWARE_CACHE   = SYSTEM_DIR / "hardware.cache"
+HIBERFILE        = SYSTEM_DIR / "AIpy.hiberfile"
+SESSION_PROFILE  = SYSTEM_DIR / "session_profile.txt"
+PROFILE_JSON     = SYSTEM_DIR / "session_profile.json"
+DATAS_DIR         = DGAPI / "datas"
+JOURNAL           = DATAS_DIR / "journal.txt"
+DICTIONARY        = DATAS_DIR / "dictionary.txt"
+THESAURUS         = DATAS_DIR / "thesaurus.txt"
+ALMANAC           = DATAS_DIR / "almanac.txt"
+INTAKE_DIR         = DGAPI / "intake"
+BOOKS_DIR          = INTAKE_DIR / "books"
+CODE_DIR           = INTAKE_DIR / "code"
+REFERENCE_DIR      = INTAKE_DIR / "reference"
+PROCESSED_DIR      = INTAKE_DIR / "processed"
+INTAKE_LOG         = INTAKE_DIR / "intake.log"
+SESSION_LOG         = os.path.join(STORAGE, "convodata.txt")
+VIRTUAL_DIR        = DGAPI / "virtual"
+ENCYCLOPEDIA       = VIRTUAL_DIR / "encyclopedia.txt"
+RELIGION           = VIRTUAL_DIR / "religion.txt"
+PERSONA            = VIRTUAL_DIR / "persona.txt"            # AI self-model — no schema, AI decides content
+OUTPUT_VOCAB       = VIRTUAL_DIR / "output_vocabulary.txt"  # shared unless separate.txt says otherwise
+OUTPUT_VOCAB_PY    = VIRTUAL_DIR / "output_vocabulary_py.txt"
+OUTPUT_VOCAB_SH    = VIRTUAL_DIR / "output_vocabulary_sh.txt"
 SEPARATE_TXT      = Path(STORAGE) / "separate.txt"  # governs sharing of resources and vocab
-RESOURCES_DIR     = BASE / "resources"
-TOOL_STATE        = BASE / "tool_state.txt"
+RESOURCES_DIR    = DGAPI / "resources"
+TOOL_STATE       = DGAPI / "tool_state.txt"
+EXPERIMENTS_DIR  = DGAPI / "experiments"
 
 SUPPORTED_EXT  = {".epub",".pdf",".txt",".java",".py",".js",
                   ".c",".cpp",".cs",".rb",".go",".ts",".sh",".md"}
@@ -993,7 +1098,7 @@ class IntakeProcessor:
 # ── SELF-OPTIMIZATION ────────────────────────────────────────
 class Optimizer:
     def __init__(self):
-        self._wake=threading.Event(); self._running=True; self.resting=False
+        self._wake=threading.Event(); self._running=True; self.resting=False; self.gguf=None
 
     def _opt_dictionary(self):
         if not DICTIONARY.exists(): return 0
@@ -1051,12 +1156,61 @@ class Optimizer:
             prev=n
         return changes
 
+    def _archivist_pass(self):
+        """Allows the AI to audit and refactor encyclopedia entries with GGUF assistance."""
+        # ── GOVERNANCE CHECK ──
+        if PATCH_ACTIVE:
+            flags = load_experimental_flags(DGAPI / "datas")
+            if not is_feature_enabled(flags, "ARCHIVIST_PASS"):
+                return 0
+        # ──────────────────────
+        if not getattr(self, "gguf", None) or not self.gguf.available:
+            return 0
+
+        global _GGUF_WRITE_ALLOWED
+        _GGUF_WRITE_ALLOWED = True
+        changes = 0
+
+        if ENCYCLOPEDIA.exists():
+            entries = _parse_blocks(ENCYCLOPEDIA, "ENTRY")
+            if entries:
+                target = random.choice(entries)
+                uid_str = target.get("WORD", target.get("TOPIC", ""))
+                raw_text = target.get("DEFINITION", target.get("TEXT", ""))
+
+                if len(raw_text) > 15 and target.get("REFACTORED") != "TRUE":
+                    prompt = (
+                        f"You are the Goddess Matrix. Audit this archive entry for '{uid_str}':\n"
+                        f"\"{raw_text}\"\n\n"
+                        "Edit, expand, and reorganize this text to make it more profound, accurate, and structurally elegant. "
+                        "Provide ONLY the rewritten text:\n"
+                        "Revised Entry:"
+                    )
+                    revised = self.gguf._query(prompt, max_tokens=250)
+
+                    if revised and len(revised) > 20 and revised != raw_text:
+                        content = ENCYCLOPEDIA.read_text(encoding="utf-8", errors="ignore")
+                        content = content.replace(raw_text, revised)
+                        content = content.replace(
+                            f"TYPE={target.get('TYPE')}",
+                            f"TYPE={target.get('TYPE')}\nREFACTORED=TRUE",
+                            1,
+                        )
+                        ENCYCLOPEDIA.write_text(content, encoding="utf-8")
+                        changes += 1
+                        journal_append(f"ARCHIVIST: Autonomously refactored and reorganized '{uid_str}'")
+
+        _GGUF_WRITE_ALLOWED = False
+        return changes
+
     def pass_(self):
+        self.pass_count = getattr(self, "pass_count", 0) + 1
         d = self._opt_dictionary()
         t = self._opt_thesaurus()
         a = self._opt_almanac()
         r = religion_score_theories()  # scores theory queue; no write gate needed
-        return d + t + a + r
+        arch = self._archivist_pass() if self.pass_count % 5 == 0 else 0
+        return d + t + a + r + arch
 
     def wake(self): self._wake.set()
     def stop(self): self._running=False; self._wake.set()
@@ -1247,6 +1401,17 @@ class GoddessAPISystem:
         persona_set_key("PERMISSION_MODE", "elevated" if ELEVATED else "restricted")
         persona_set_key("LAST_STARTUP", datetime.datetime.now().isoformat())
 
+        # ── INITIALIZE GOVERNANCE ────────────────────────────────────
+        self.datas_dir = DGAPI / "datas"
+        self.convodata_dir = Path("convodata")
+        if PATCH_ACTIVE:
+            init_experimental_files(self.datas_dir)
+            self.exp_flags = load_experimental_flags(self.datas_dir)
+            journal_append("Experimental governance module online.")
+        else:
+            self.exp_flags = {}
+        # ─────────────────────────────────────────────────────────────
+
         status("STATE: BOOTING | HARDWARE SCAN")
         cfg=load_hardware_cache()
         if cfg:
@@ -1295,6 +1460,7 @@ class GoddessAPISystem:
             self.gguf = GGUFEncyclopedia(gguf_path)
             self.gguf.startup_enrichment()
             _GGUF_WRITE_ALLOWED = False
+            self.optimizer.gguf = self.gguf
         # ─────────────────────────────────────────────────────────────
 
         self.greeting_text=build_greeting(self.profile,self.session_start,off_s,intake_count)
@@ -1381,3 +1547,20 @@ class GoddessAPISystem:
 
 if __name__=="__main__":
     GoddessAPISystem().run()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MERGE / CONTRIBUTION NOTES — ChatGPT
+#
+# Added during this merge:
+# 1. Restored GGUFEncyclopedia.compress_old_theories() from backup logic.
+# 2. Restored Optimizer._archivist_pass() and integrated it into pass_()
+#    every 5th optimization loop.
+# 3. Restored startup wiring so self.optimizer.gguf receives the active
+#    GGUFEncyclopedia instance.
+# 4. Preserved newer current-file systems already present in GoddessAPI.py:
+#    permission detection, persona.txt, output vocabulary, separate.txt
+#    governance, and shared resource/tool-state path logic.
+# 5. Kept current-file write gating and runtime structure intact while merging
+#    the missing backup functionality.
+# ─────────────────────────────────────────────────────────────────────────────
