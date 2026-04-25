@@ -565,7 +565,8 @@ EXPERIMENTS_DIR  = DGAPI / "experiments"
 SUPPORTED_EXT  = {".epub",".pdf",".txt",".java",".py",".js",
                   ".c",".cpp",".cs",".rb",".go",".ts",".sh",".md"}
 
-for d in [STORAGE, BOOKS_DIR, CODE_DIR, REFERENCE_DIR, PROCESSED_DIR]:
+# Ensure all structural and subsystem directories are created on fresh boot
+for d in [STORAGE, SYSTEM_DIR, DATAS_DIR, VIRTUAL_DIR, EXPERIMENTS_DIR, RESOURCES_DIR, BOOKS_DIR, CODE_DIR, REFERENCE_DIR, PROCESSED_DIR]:
     Path(d).mkdir(parents=True, exist_ok=True)
 
 # ── TIMESTAMPS ───────────────────────────────────────────────
