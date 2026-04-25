@@ -1,0 +1,11 @@
+MANIFEST_IMAGE: fn1-cd-20260425_004916.png
+# USER> SYSTEM> NATIVE_EXPLORER_TRIGGERED [/home/root/AI/scrpt/Linux]
+# USER> welcome to the GoddessMatrix, fn+f1, fn+f2 changes active session: fn+A.I. and A.I. standalone uses .py vs .sh variants: Exec, A.I. uses resoarces from osDev directory: Scrpt uses the host os resoarces, PWR on numpad enables calculator functionality, NUM enables numpad functionality: PRT prints clipboard to chat, clr clears chat
+# USER> clRh 
+# USER> clRH 
+# USER> clears 
+# USER> chathistory without deleting file, so history still present at reboot. DIV locks external input to chat, onscreen keyboard works for if bugs.
+# USER> shift+PRT copies chat input to clipboard
+# USER> fn+NTR opens terminal in chroot using osDev as chroot dir which auto mounts/umounts at launch/exit NTR alone opens a terminal with MANIFEST_IMAGE: fn1-cd-20260425_023729.png
+#A: INTERACTION_DETECTED: GET / HTTP/1.1" 200 5203 "-" "curl/7.64.1
+#A: INTERACTION_DETECTED: GET / HTTP/1.1" 200 1730 "-" "curl/7.74.0
