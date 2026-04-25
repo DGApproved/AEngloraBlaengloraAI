@@ -59,11 +59,13 @@ public class GoddessMatrix extends JFrame {
     private static final Color INPUT_BG = new Color(15, 15, 20);
     private static final Color HISTORY_BG = new Color(5, 5, 7);
     private static final Color MANIFEST_BG = new Color(12, 12, 15);
-        //strings
-    private static final String STORAGE_FOLDER = "convodata";
+        //string: Paths & System Constants
+    private static final String FN_BASE_DIR = "fn";
+    private static final String SCRPT_FOLDER = "scrpt";
+    private static final String HTML_FOLDER = "HTML";
+    private static final String OS_DEV_FOLDER = "osDev";
     private static final String MASTER_LOG = "convodata.txt";
     private static final String AI_INPUT_FILE = "ai_input.txt";
-    private static final String HTML_FOLDER = "HTML";
     private static final String APACHE_LOG_PATH = "/var/log/apache2/access.log";
     private static final String API_OFFLINE = "[API_OFFLINE]";
         //Jlabels
@@ -217,7 +219,9 @@ public class GoddessMatrix extends JFrame {
         new File(osDevDir, "dev").mkdirs();
         new File(osDevDir, "dev/pts").mkdirs();
 
-        ensureStorageDirectoryExists();
+        //ensureStorageDirectoryExists();
+        buildMatrixArchitecture();
+
         checkApacheIntegration();
         initializeApacheSentryPointer();
             //Jpanels
@@ -1291,16 +1295,28 @@ public class GoddessMatrix extends JFrame {
 
     private void pollAIInput() 
     {
-        File aiFile = new File(STORAGE_FOLDER + File.separator + AI_INPUT_FILE);
+        File sessionDir = sessionDirectories.get(currentSession);
+        if (sessionDir == null) return;
+        
+        File aiFile = new File(sessionDir, "dgapi" + File.separator + "system" + File.separator + AI_INPUT_FILE);
         if (aiFile.exists() && aiFile.length() > 0) {
             try {
                 byte[] bytes = Files.readAllBytes(aiFile.toPath());
                 String content = new String(bytes);
-                if (!content.isEmpty()) 
-                {
+                if (!content.isEmpty()) {
                     Files.write(aiFile.toPath(), new byte[0]);
                     simulateTyping(content);
                 }
+     //   File aiFile = new File(STORAGE_FOLDER + File.separator + AI_INPUT_FILE);
+     //   if (aiFile.exists() && aiFile.length() > 0) {
+     //       try {
+     //           byte[] bytes = Files.readAllBytes(aiFile.toPath());
+     //           String content = new String(bytes);
+     //           if (!content.isEmpty()) 
+     //           {
+     //               Files.write(aiFile.toPath(), new byte[0]);
+     //               simulateTyping(content);
+     //           }
             } catch (IOException ignored) {}
         }
     }
@@ -1363,7 +1379,7 @@ public class GoddessMatrix extends JFrame {
         return "bash";
     }
     
-    private void launchExternalTerminal(boolean asChroot) 
+    private void launchExternalTerminal(boolean asChroot, File targetDir) 
     {
         try {
             String os = System.getProperty("os.name").toLowerCase();
@@ -1413,7 +1429,7 @@ public class GoddessMatrix extends JFrame {
                     pb = new ProcessBuilder("x-terminal-emulator");
                 }
             }
-            pb.directory(currentWorkingDirectory);
+            pb.directory(targetDir);
             pb.start();
             statusLabel.setText(asChroot ? "SYS_EXEC: CHROOT_TERMINAL_OPEN" : "SYS_EXEC: TERMINAL_OPENED");
         } catch (IOException e) {
@@ -1449,20 +1465,28 @@ public class GoddessMatrix extends JFrame {
 
     private String getOSScriptFolder() {
         String os = System.getProperty("os.name").toLowerCase();
-        if (os.contains("win")) return "winscripts";
-        if (os.contains("mac")) return "macscripts";
-        return "intscripts";
+        String platform = "Linux";
+        if (os.contains("win")) return "Windows";
+        if (os.contains("mac")) return "MacOSY";
+
+        return aiHomeDirectory + File.separator + SCRPT_FOLDER + File.separator + platform;
     }
 
     private synchronized void writeToSessionLog(int sessionId, boolean isScript, String text) {
         try {
-            File logFile = isScript
-                    ? new File(getOSScriptFolder(), "script_fn" + sessionId + ".txt")
-                    : new File(STORAGE_FOLDER + File.separator + "fn" + sessionId + "_convodata.txt");
-            Files.write(logFile.toPath(), text.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            // Write to the specific FN folder's convodata.txt
+            File sessionLog = new File(aiHomeDirectory + File.separator + FN_BASE_DIR + File.separator + "fn" + sessionId, MASTER_LOG);
+            //File logFile = isScript
+            //        ? new File(getOSScriptFolder(), "script_fn" + sessionId + ".txt")
+            //        : new File(STORAGE_FOLDER + File.separator + "fn" + sessionId + "_convodata.txt");
+            //Files.write(logFile.toPath(), text.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            Files.write(sessionLog.toPath(), text.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            // If it's a host script, also mirror it to the script folder for debugging
             if (!isScript) {
-                File masterLog = new File(STORAGE_FOLDER + File.separator + MASTER_LOG);
-                Files.write(masterLog.toPath(), text.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                File scriptLog = new File(getOSScriptFolder(), "script_fn" + sessionId + ".txt");
+                Files.write(scriptLog.toPath(), text.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                //File masterLog = new File(STORAGE_FOLDER + File.separator + MASTER_LOG);
+                //Files.write(masterLog.toPath(), text.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             }
         } catch (IOException ignored) {
         }
@@ -1483,8 +1507,10 @@ public class GoddessMatrix extends JFrame {
         currentWorkingDirectory = sessionDirectories.getOrDefault(sessionNum, new File(aiHomeDirectory));
 
         File sessionFile = isScriptModeActive
+                //? new File(getOSScriptFolder(), "script_fn" + sessionNum + ".txt")
+                //: new File(STORAGE_FOLDER + File.separator + "fn" + sessionNum + "_convodata.txt");
                 ? new File(getOSScriptFolder(), "script_fn" + sessionNum + ".txt")
-                : new File(STORAGE_FOLDER + File.separator + "fn" + sessionNum + "_convodata.txt");
+                : new File(sessionDirectories.get(sessionNum), MASTER_LOG);
 
         if (!sessionFile.exists()) {
             try {
@@ -1585,7 +1611,7 @@ public class GoddessMatrix extends JFrame {
                 }
 
                 ProcessBuilder pb = new ProcessBuilder(commandList);
-                pb.directory(currentWorkingDirectory);
+                pb.directory(new File(scriptDir));
                 pb.redirectErrorStream(true);
 
                 SessionProcess sp = new SessionProcess();
@@ -1797,20 +1823,96 @@ public class GoddessMatrix extends JFrame {
         }).start(); //Thread
     }
 
-    private void ensureStorageDirectoryExists() 
-    {
-        File dir = new File(STORAGE_FOLDER);
-        if (!dir.exists()) 
-        {
-            dir.mkdirs();
+    //private void ensureStorageDirectoryExists() 
+    //{
+    //    File dir = new File(STORAGE_FOLDER);
+    //    if (!dir.exists()) 
+    //    {
+    //        dir.mkdirs();
+    //    }
+    //    new File(HTML_FOLDER).mkdirs();
+    //    new File(getOSScriptFolder()).mkdirs();
+    //    try {
+    //        new File(STORAGE_FOLDER + File.separator + AI_INPUT_FILE).createNewFile();
+    //    } catch (IOException ignored) {   
+    //    }
+    //}
+    private void buildMatrixArchitecture() {
+        File root = new File(aiHomeDirectory);
+
+        // 1. Build Host Script Directories
+        String[] platforms = {"Linux", "MacOSY", "Windows"};
+        for (String p : platforms) {
+            new File(root, SCRPT_FOLDER + File.separator + p).mkdirs();
         }
-        new File(HTML_FOLDER).mkdirs();
-        new File(getOSScriptFolder()).mkdirs();
-        try {
-            new File(STORAGE_FOLDER + File.separator + AI_INPUT_FILE).createNewFile();
-        } catch (IOException ignored) {   
+
+        // 2. Build Subsystems
+        new File(root, HTML_FOLDER).mkdirs();
+        new File(root, OS_DEV_FOLDER + File.separator + "bin").mkdirs();
+        new File(root, OS_DEV_FOLDER + File.separator + "home").mkdirs();
+        new File(root, OS_DEV_FOLDER + File.separator + "AI" + File.separator + "bin").mkdirs();
+
+        // 3. Build the FN Multi-Tenant Architecture (FN1 - FN12)
+        for (int i = 1; i <= 12; i++) {
+            File fnDir = new File(root, FN_BASE_DIR + File.separator + "fn" + i);
+            File execDir = new File(fnDir, "exec");
+            File dgapiDir = new File(fnDir, "dgapi");
+            
+            // Core FN folders
+            execDir.mkdirs();
+            new File(dgapiDir, "datas").mkdirs();
+            new File(dgapiDir, "experiments").mkdirs();
+            new File(dgapiDir, "system").mkdirs();
+            new File(dgapiDir, "virtual").mkdirs();
+            
+            // Intake pipeline
+            File intakeDir = new File(dgapiDir, "intake");
+            new File(intakeDir, "books").mkdirs();
+            new File(intakeDir, "code").mkdirs();
+            new File(intakeDir, "processed").mkdirs();
+            new File(intakeDir, "reference").mkdirs();
+
+            // Pre-seed necessary files
+            try {
+                new File(fnDir, MASTER_LOG).createNewFile();
+                new File(dgapiDir + File.separator + "system", AI_INPUT_FILE).createNewFile();
+            } catch (IOException ignored) {}
+
+            // Pre-map the session directory so EXEC/AI know where they live
+            sessionDirectories.put(i, fnDir);
+
+            // Drop tenant READMEs
+            createReadme(fnDir, "README.md", 
+                "# FN" + i + " Matrix Node\n" +
+                "This is an isolated tenant node. All AI memory, execution history, and API data occurring on FN" + i + " stays strictly within this folder to prevent context bleed.");
+            
+            createReadme(intakeDir, "README.txt", 
+                "INTAKE PIPELINE\n" +
+                "Drop .txt, .pdf, .epub, or code files into the subfolders here. The AI will autonomously read and process them into its dictionary and almanac.");
         }
+
+        // 4. Drop Global System READMEs
+        createReadme(root, "README.md", 
+            "# Goddess Matrix Hub\n" +
+            "Welcome to the split-brain sandbox environment.\n\n" +
+            "- **/fn:** Contains the isolated multi-tenant nodes (FN1-FN12).\n" +
+            "- **/scrpt:** Contains host-native execution scripts.\n" +
+            "- **/osDev:** The highly restricted chroot sandbox for testing.\n" +
+            "- **/HTML:** The local Apache web bridge for the MJPEG stream.");
+            
+        createReadme(new File(root, SCRPT_FOLDER), "README.txt", 
+            "HOST SCRIPTS\n" +
+            "Scripts placed in these OS-specific folders execute natively on the host machine, bypassing the osDev sandbox. Requires elevated permissions.");
     }
+
+    private void createReadme(File directory, String filename, String content) {
+        File readme = new File(directory, filename);
+        if (!readme.exists()) {
+            try {
+                Files.write(readme.toPath(), content.getBytes(), StandardOpenOption.CREATE);
+            } catch (IOException ignored) {}
+        }
+    }    
 
     private void cacheChatData(String text) 
     {
@@ -1846,13 +1948,21 @@ public class GoddessMatrix extends JFrame {
 
     private void saveSession() 
     {
-        File masterFile = new File(STORAGE_FOLDER + File.separator + MASTER_LOG);
-        File sessionFile = new File(STORAGE_FOLDER + File.separator + "fn" + currentSession + "_convodata.txt");
-        try 
-        {
-            for (String entry : pendingLogs) 
-            {
-                Files.write(masterFile.toPath(), entry.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        //File masterFile = new File(STORAGE_FOLDER + File.separator + MASTER_LOG);
+        //File sessionFile = new File(STORAGE_FOLDER + File.separator + "fn" + currentSession + "_convodata.txt");
+        //try 
+        //{
+        //    for (String entry : pendingLogs) 
+        //    {
+        //        Files.write(masterFile.toPath(), entry.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        //        Files.write(sessionFile.toPath(), entry.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        //    }
+        File sessionDir = sessionDirectories.get(currentSession);
+        if (sessionDir == null) return;
+        
+        File sessionFile = new File(sessionDir, MASTER_LOG);
+        try {
+            for (String entry : pendingLogs) {
                 Files.write(sessionFile.toPath(), entry.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             }
             pendingLogs.clear();
@@ -1877,7 +1987,9 @@ public class GoddessMatrix extends JFrame {
         String fileName = "fn" + currentSession + "-cd-" + timestamp + ".png";
         try 
         {
-            File outputFile = new File(STORAGE_FOLDER + File.separator + fileName);
+            //File outputFile = new File(STORAGE_FOLDER + File.separator + fileName);
+            File sessionDir = sessionDirectories.get(currentSession);
+            File outputFile = new File(sessionDir, fileName);
             ImageIO.write(img, "png", outputFile);
             sessionImagePaths.add(fileName);
             galleryIndex = sessionImagePaths.size() - 1;
@@ -1901,7 +2013,9 @@ public class GoddessMatrix extends JFrame {
             File imgFile = new File(fileName);
             if (!imgFile.isAbsolute()) 
             {
-                imgFile = new File(STORAGE_FOLDER + File.separator + fileName);
+                File sessionDir = sessionDirectories.get(currentSession);
+                imgFile = new File(sessionDir, fileName);    
+                //imgFile = new File(STORAGE_FOLDER + File.separator + fileName);
             }
             if (imgFile.exists()) 
             {
@@ -1961,56 +2075,54 @@ public class GoddessMatrix extends JFrame {
     // ════════════════════════════════════════════════════════
 
 private void loadSystemProfile() 
+{
+    File sessionDir = sessionDirectories.get(currentSession);
+    if (sessionDir == null) return;
+
+    // V14.4 looks in the dedicated datas folder first
+    //File profileFile = new File("datas" + File.separator + "session_profile.txt");
+    File profileFile = new File(sessionDir, "dgapi" + File.separator + "system" + File.separator + "session_profile.txt");
+
+    // Fallbacks for legacy/testing
+    if (profileFile.exists()) 
     {
-        // V14.4 looks in the dedicated datas folder first
-        File profileFile = new File("datas" + File.separator + "session_profile.txt");
-        
-        // Fallbacks for legacy/testing
-        if (!profileFile.exists()) {
-            profileFile = new File("session_profile.txt");
-        }
-        if (!profileFile.exists()) {
-            profileFile = new File(STORAGE_FOLDER + File.separator + "session_profile.txt");
-        }
-        
-        if (profileFile.exists()) 
+        try 
         {
-            try 
+            List<String> lines = java.nio.file.Files.readAllLines(profileFile.toPath());
+            List<String> relevant = new ArrayList<>();
+            for (String l : lines) 
             {
-                List<String> lines = java.nio.file.Files.readAllLines(profileFile.toPath());
-                List<String> relevant = new ArrayList<>();
-                for (String l : lines) 
+                String t = l.trim();
+                if (t.startsWith("CPU") || t.startsWith("GPU") || t.startsWith("RAM")
+                        || t.startsWith("Mode") || t.startsWith("Cores")
+                        || t.startsWith("REASONING") || t.contains(":")) 
                 {
-                    String t = l.trim();
-                    if (t.startsWith("CPU") || t.startsWith("GPU") || t.startsWith("RAM")
-                            || t.startsWith("Mode") || t.startsWith("Cores")
-                            || t.startsWith("REASONING") || t.contains(":")) 
+                    if (t.length() > 3 && !t.startsWith("═") && !t.startsWith("─")
+                            && !t.startsWith("#") && !t.startsWith("━")) 
                     {
-                        if (t.length() > 3 && !t.startsWith("═") && !t.startsWith("─")
-                                && !t.startsWith("#") && !t.startsWith("━")) 
-                        {
-                            relevant.add(t);
-                        }
+                        relevant.add(t);
                     }
                 }
+            }
                 if (relevant.size() > 0) systemProfileLine1 = relevant.get(0);
                 if (relevant.size() > 1) systemProfileLine2 = relevant.get(1);
                 if (relevant.size() > 2) systemProfileLine3 = relevant.get(2);
-            } 
-            catch (Exception ignored) 
-            {
+        } 
+        catch (Exception ignored) 
+        {
                 systemProfileLine1 = "PROFILE: session_profile.txt";
                 systemProfileLine2 = "Drop profile in working directory";
                 systemProfileLine3 = "or run GoddessAPI.sh first";
-            }
-        } 
-        else 
-        {
-            systemProfileLine1 = "PROFILE: NOT FOUND";
-            systemProfileLine2 = "Run GoddessAPI.sh to generate profile";
-            systemProfileLine3 = "";
+        //profileFile = new File("session_profile.txt");
         }
     }
+    else 
+    {
+        systemProfileLine1 = "PROFILE: NOT FOUND";
+        systemProfileLine2 = "Run GoddessAPI.sh to generate profile";
+        systemProfileLine3 = "";
+    }
+}
 
     private void startAIRenderer(int sessionId) {
         // No separate timer — rendering is driven by the display-rate
@@ -2729,11 +2841,24 @@ private void loadSystemProfile()
         b.setFocusPainted(false);
         b.setMargin(new Insets(0, 0, 0, 0));
         b.setBorder(BorderFactory.createLineBorder(new Color(255, 255, 255, 10), 1));
-        b.addActionListener(e -> handleMatrixEvent(index, b, true));
+        b.addMouseListener(new MouseAdapter() 
+        {
+            @Override
+            public void mousePressed(MouseEvent e) 
+            {
+                boolean isRightClick = SwingUtilities.isRightMouseButton(e);
+                handleMatrixEvent(index, b, true, isRightClick);
+            }
+        });//b.addActionListener(e -> handleMatrixEvent(index, b, true));
         buttons.put(index, b);
         return b;
     }
+    // Hardware keyboard bridge and auto-typer fallback (defaults to left-click)
     private void handleMatrixEvent(int index, JButton btn, boolean isMouse) 
+    {
+        handleMatrixEvent(index, btn, isMouse, false);
+    }   
+    private void handleMatrixEvent(int index, JButton btn, boolean isMouse, boolean isRightClick) 
     {
         if (index == 101) 
         {
@@ -2905,8 +3030,9 @@ private void loadSystemProfile()
         if (index == 14) 
         {
             boolean doChroot = isFnPending;
-            isFnPending = false;
-            launchExternalTerminal(doChroot);
+            isFnPending = false;// Right-click opens the Host Script folder. Left-click opens the Tenant folder.
+            File targetDir = isRightClick ? new File(getOSScriptFolder()) : currentWorkingDirectory;
+            launchExternalTerminal(doChroot, targetDir);
             btn.setBackground(isMouse ? GODDESS_PURPLE : HW_PURPLE);
             new Timer(150, evt -> 
             {
