@@ -1,20 +1,32 @@
 /*
-* Goddess input Matrix [AlphaBeta Build] v.14.4
-*
-* What is it?
-* Multifunction Java based Terminal, AI, Script, and terminal linker with chroot and other developing special features. 
-*
-* Features:
-* 1. Multi-session process isolation across FN1-FN12.
-* 2. Per-session API processes and telemetry HUD state.
-* 3. EXEC mode sandboxed to osDev via HOME/PATH hijack.
-* 4. SCRPT mode runs host-native.
-* 5. FN + NTR launches chroot helper terminal.
-* 6. API [STATUS], [IMAGE], [CHAT], [TYPE], [PROCESSING] protocol support.
-* 7. API binary lookup prefers /AI/osDev/bin when FN is pending before A.I. activation.
-* 8. VIRTUAL DISPLAY BRIDGE: MJPEG stream support for both A.I. and EXEC modes.
-* 9. KINETIC MOUSE ROUTING: Clicks on manifest stream back to the active session.
-*/
+ * Goddess Input Matrix [AlphaBeta Build] v14.4
+ *
+ * What is it?
+ * Multifunction Java-based terminal, AI bridge, script runner, chroot helper,
+ * visual manifest renderer, and multi-session runtime controller.
+ *
+ * Features:
+ * 1. Multi-session process isolation across FN1-FN12.
+ * 2. Per-session API processes, stdin routing, telemetry HUD state, and logs.
+ * 3. EXEC mode sandboxed to osDev via HOME/PATH hijack.
+ * 4. SCRPT mode runs host-native for unrestricted user scripts.
+ * 5. FN + NTR launches chroot helper terminal.
+ * 6. AI-alone launches GoddessAPI.sh / GoddessAPI.bat; FN + AI launches GoddessAPI.py.
+ * 7. API binary lookup supports deep AI localization through osDev/AI/bin.
+ * 8. API protocol support: [STATUS], [IMAGE], [CHAT], [TYPE], [PROCESSING],
+ *    [ACTION], [STREAM_START], [STREAM_STOP], and unknown-tag logging.
+ * 9. Virtual Display Bridge: MJPEG stream support for A.I., EXEC, and SCRPT modes.
+ * 10. Kinetic Mouse Routing: manifest clicks route back to the active session.
+ * 11. AI Visual Renderer Mode A: display-rate-synced waveform HUD.
+ * 12. AI Visual Renderer Mode B: avatar / stick-figure mode toggled by right-click.
+ * 13. image.xtx directive system for AI-evolvable visual appearance.
+ * 14. Per-FN folder architecture: fn/fn1..fn12 with dgapi/datas, intake,
+ *     system, virtual, and processed folders.
+ * 15. Per-session ai_input.txt polling from dgapi/system/.
+ * 16. Per-session manifest image saving and gallery cycling.
+ * 17. Apache HTML import and coonle index hub regeneration.
+ * 18. Native [DIR] button opens the active script folder in the OS file browser.
+ */
 
 //imports
 import javax.swing.*;
@@ -59,15 +71,16 @@ public class GoddessMatrix extends JFrame {
     private static final Color INPUT_BG = new Color(15, 15, 20);
     private static final Color HISTORY_BG = new Color(5, 5, 7);
     private static final Color MANIFEST_BG = new Color(12, 12, 15);
-        //string: Paths & System Constants
-    private static final String FN_BASE_DIR = "fn";
-    private static final String SCRPT_FOLDER = "scrpt";
-    private static final String HTML_FOLDER = "HTML";
-    private static final String OS_DEV_FOLDER = "osDev";
-    private static final String MASTER_LOG = "convodata.txt";
-    private static final String AI_INPUT_FILE = "ai_input.txt";
+        //strings
+    private static final String FN_BASE_DIR    = "fn";
+    private static final String SCRPT_FOLDER   = "scrpt";
+    private static final String MASTER_LOG      = "convodata.txt";
+    private static final String STORAGE_FOLDER  = "convodata";
+    private static final String AI_INPUT_FILE   = "ai_input.txt";
+    private static final String HTML_FOLDER     = "HTML";
+    private static final String OS_DEV_FOLDER   = "osDev";
     private static final String APACHE_LOG_PATH = "/var/log/apache2/access.log";
-    private static final String API_OFFLINE = "[API_OFFLINE]";
+    private static final String API_OFFLINE     = "[API_OFFLINE]";
         //Jlabels
     private JLabel statusLabel;
     private JLabel modifierLabel;
@@ -208,7 +221,7 @@ public class GoddessMatrix extends JFrame {
         osDevBin = new File(osDevDir, "bin");
         osDevHome = new File(osDevDir, "home");
         osDevAIDir = new File(osDevDir, "AI");
-        osDevAIBin = new File(osDevDir, "AI");
+        osDevAIBin = new File(osDevDir, "AI" + File.separator + "bin");
 
         osDevBin.mkdirs();
         osDevHome.mkdirs();
@@ -219,9 +232,7 @@ public class GoddessMatrix extends JFrame {
         new File(osDevDir, "dev").mkdirs();
         new File(osDevDir, "dev/pts").mkdirs();
 
-        //ensureStorageDirectoryExists();
         buildMatrixArchitecture();
-
         checkApacheIntegration();
         initializeApacheSentryPointer();
             //Jpanels
@@ -338,19 +349,29 @@ public class GoddessMatrix extends JFrame {
         {
             @Override
             public void mouseClicked(MouseEvent e) 
-            {
-                if (isVideoStreamActive) {
-                    routeMouseClickToSession(e.getX(), e.getY(), e.getButton(), e.getClickCount());
-                }
-
-                // Right-click: toggle Mode A (waveform HUD) <-> Mode B (avatar).
-                // Does not interfere with expand/cinematic gestures on left-click.
+            {// Right-click globally toggles Mode A / Mode B
                 if (e.getButton() == MouseEvent.BUTTON3) 
                 {
                     handleManifestRightClick();
                     return;
+                }// ── CINEMATIC PASSTHROUGH MODE ──
+                if (manifestState == 2) 
+                {
+                    if (e.getClickCount() == 2) 
+                    {
+                        restoreManifest(); // Double-click to escape
+                    } 
+                    else 
+                    {
+                        // Single clicks are piped directly into the AI/Process
+                        routeMouseClickToSession(e.getX(), e.getY(), e.getButton(), e.getClickCount());
+                    }
+                    return; // Block all other UI logic while in passthrough
+                }// ── STANDARD MANIFEST EXPANSION ──
+                if (isVideoStreamActive) 
+                {
+                    routeMouseClickToSession(e.getX(), e.getY(), e.getButton(), e.getClickCount());
                 }
-
                 boolean doubleTrigger = (e.getClickCount() == 2 || isAltPending);
                 if (manifestState == 0) 
                 {
@@ -358,15 +379,8 @@ public class GoddessMatrix extends JFrame {
                     originalParent = imageManifest.getParent();
                     if (doubleTrigger) 
                     {
-                        manifestState = 2;
-                        statusLabel.setText("SYS_MANIFEST: CINEMATIC_MODE_ACTIVE");
-                        if (isHtmlStreamActive) 
-                        {
-                            isUserModeActive = true;
-                            statusLabel.setText("SYS_STATE: CONTROLLER_MODE_ENGAGED");
-                            chatHistory.append("SYSTEM> CONTROLLER_MODE_ENGAGED\n");
-                        }
-
+                        manifestState = 2; // Enter Cinematic Passthrough
+                        statusLabel.setText("SYS_MANIFEST: CINEMATIC_PASSTHROUGH_ACTIVE");
                         isAltPending = false;
                         updateModifierVisuals();
                         JRootPane root = getRootPane();
@@ -378,31 +392,19 @@ public class GoddessMatrix extends JFrame {
                     } 
                     else 
                     {
-                        manifestState = 1;
+                        manifestState = 1; // Area Expansion
                         statusLabel.setText("SYS_MANIFEST: AREA_MODE_ACTIVE");
                         imageManifest.setBounds(0, 0, matrixPanel.getWidth(), matrixPanel.getHeight());
                         matrixPanel.setComponentZOrder(imageManifest, 0);
                     }
                 } 
-                else 
+                else if (manifestState == 1 && e.getClickCount() == 1) 
                 {
-                    if (manifestState == 1 && e.getClickCount() == 1) 
-                    {
-                        restoreManifest();
-                    } 
-                    else if (manifestState == 2 && doubleTrigger) 
-                    {
-                        restoreManifest();
-                        if (isAltPending) 
-                        {
-                            isAltPending = false;
-                            updateModifierVisuals();
-                        }
-                    }
+                    restoreManifest();
                 }
                 repaint();
             }
-        }); //mouseadapter
+        });
 
         matrixPanel.add(imageManifest);
             //JPanels
@@ -527,6 +529,17 @@ public class GoddessMatrix extends JFrame {
             if (sp != null && sp.stdin != null) sp.stdin.println(inputStr);
         }
     }
+    private void routeKeyPressToSession(int keyCode, char keyChar) {
+        String inputStr = String.format("[INPUT_KEY] CODE:%d CHAR:%c", keyCode, keyChar);
+        if (isAIModeActive) {
+            PrintWriter stdin = apiStdinMap.get(currentSession);
+            if (stdin != null) stdin.println(inputStr);
+        } else if (isSystemModeActive || isScriptModeActive) {
+            SessionProcess sp = processMap.get(currentSession);
+            if (sp != null && sp.stdin != null) sp.stdin.println(inputStr);
+        }
+    }
+
     // ───────────────────────────────────────────────────────────────────────
 
     /**
@@ -536,7 +549,7 @@ public class GoddessMatrix extends JFrame {
     /**
      * Resolves the API binary based on activation mode:
      *
-     *   AI alone  -> GoddessAPI.sh / ai_system.bat
+     *   AI alone  -> GoddessAPI.sh / GoddessAPI.bat
      *                The Python AI system (hardware profiler, intake reader,
      *                journal, dictionary, almanac, hibernate state).
      *                Searched in: script folder, then working directory root.
@@ -551,29 +564,30 @@ public class GoddessMatrix extends JFrame {
     private File resolveAPIBinary(boolean useDeepAILocalization) 
     {
         String osName = System.getProperty("os.name").toLowerCase();
+        String scriptDir = getOSScriptFolder();
 
         if (useDeepAILocalization) 
         {
             // FN+AI mode: GoddessAPI.py — direct API bridge.
             // Search /AI/osDev/bin first (deep localization), then script folder.
+            File standard = new File(scriptDir, "GoddessAPI.py");
+            if (standard.exists()) 
+            {
+                return standard;
+            }
             File deep = new File(osDevAIBin, "GoddessAPI.py");
             if (deep.exists()) 
             {
                 return deep;
             }
-            File standard = new File(getOSScriptFolder(), "GoddessAPI.py");
-            if (standard.exists()) 
-            {
-                return standard;
-            }
             return null;
         } 
         else 
         {
-            // AI alone: GoddessAPI.sh / ai_system.bat — Python AI system.
+            // AI alone: GoddessAPI.sh / GoddessAPI.bat — Python AI system.
             // Searches script folder first, then working directory root.
-            String scriptName = osName.contains("win") ? "ai_system.bat" : "GoddessAPI.sh";
-            File standard = new File(getOSScriptFolder(), scriptName);
+            String scriptName = osName.contains("win") ? "GoddessAPI.bat" : "GoddessAPI.sh";
+            File standard = new File(scriptDir, scriptName);
             if (standard.exists()) 
             {
                 return standard;
@@ -630,22 +644,27 @@ public class GoddessMatrix extends JFrame {
                 // .bat -> cmd /c            (Windows)
                 // null -> fallback name     (should not occur if scripts are in place)
                 List<String> cmd = new ArrayList<>();
-                if (apiFile != null && apiFile.getName().endsWith(".py")) 
+                String fallbackDir = getOSScriptFolder() + File.separator;
+
+                if (useDeepAILocalization) 
                 {
                     // Python script — FN+AI path (GoddessAPI.py)
                     cmd.add(osName.contains("win") ? "python" : "python3");
-                    cmd.add(apiFile.getAbsolutePath());
-                } 
-                else if (osName.contains("win")) 
-                {
-                    cmd.add("cmd.exe");
-                    cmd.add("/c");
-                    cmd.add(apiFile != null ? apiFile.getAbsolutePath() : "ai_system.bat");
+                    cmd.add(apiFile != null ? apiFile.getAbsolutePath() : fallbackDir + "GoddessAPI.py");
                 } 
                 else 
                 {
-                    cmd.add("bash");
-                    cmd.add(apiFile != null ? apiFile.getAbsolutePath() : "GoddessAPI.sh");
+                    if (osName.contains("win")) 
+                    {
+                    cmd.add("cmd.exe");
+                    cmd.add("/c");
+                    cmd.add(apiFile != null ? apiFile.getAbsolutePath() : fallbackDir + "GoddessAPI.bat");
+                    } 
+                    else 
+                    {
+                        cmd.add("bash");
+                        cmd.add(apiFile != null ? apiFile.getAbsolutePath() : fallbackDir + "GoddessAPI.sh");
+                    }
                 }
 
                 ProcessBuilder pb = new ProcessBuilder(cmd);
@@ -916,6 +935,22 @@ public class GoddessMatrix extends JFrame {
         }
     }
 
+    private void buildMatrixArchitecture() 
+    {
+        for (int i = 1; i <= 12; i++) 
+        {
+            File sessionDir = new File(aiHomeDirectory + File.separator + FN_BASE_DIR + File.separator + "fn" + i);
+            if (!sessionDir.exists()) 
+            {
+                sessionDir.mkdirs();
+            }
+            sessionDirectories.put(i, sessionDir);
+            
+            // Pre-scaffold the system directory for the AI bridge
+            new File(sessionDir, "dgapi" + File.separator + "system").mkdirs();
+        }
+    }
+
     private void checkApacheIntegration() 
     {
         File indexFile = new File(HTML_FOLDER, "index.html");
@@ -1109,6 +1144,10 @@ public class GoddessMatrix extends JFrame {
             if (e.getID() != KeyEvent.KEY_PRESSED) 
             {
                 return false;
+            }                                                            // ── CINEMATIC MODE PASSTHROUGH ──
+            if (manifestState == 2) {  // If the visual renderer is fullscreen, intercept all typing and send raw keystrokes directly to the active session.
+                routeKeyPressToSession(e.getKeyCode(), e.getKeyChar());
+                return true; // Consume the event so it doesn't hit the Matrix typing buffer
             }
             if (e.getKeyCode() == KeyEvent.VK_PAUSE) 
             {
@@ -1297,26 +1336,17 @@ public class GoddessMatrix extends JFrame {
     {
         File sessionDir = sessionDirectories.get(currentSession);
         if (sessionDir == null) return;
-        
+
         File aiFile = new File(sessionDir, "dgapi" + File.separator + "system" + File.separator + AI_INPUT_FILE);
         if (aiFile.exists() && aiFile.length() > 0) {
             try {
                 byte[] bytes = Files.readAllBytes(aiFile.toPath());
                 String content = new String(bytes);
-                if (!content.isEmpty()) {
+                if (!content.isEmpty()) 
+                {
                     Files.write(aiFile.toPath(), new byte[0]);
                     simulateTyping(content);
                 }
-     //   File aiFile = new File(STORAGE_FOLDER + File.separator + AI_INPUT_FILE);
-     //   if (aiFile.exists() && aiFile.length() > 0) {
-     //       try {
-     //           byte[] bytes = Files.readAllBytes(aiFile.toPath());
-     //           String content = new String(bytes);
-     //           if (!content.isEmpty()) 
-     //           {
-     //               Files.write(aiFile.toPath(), new byte[0]);
-     //               simulateTyping(content);
-     //           }
             } catch (IOException ignored) {}
         }
     }
@@ -1463,30 +1493,34 @@ public class GoddessMatrix extends JFrame {
         }
     }
 
-    private String getOSScriptFolder() {
+    private String getOSScriptFolder()
+    {
         String os = System.getProperty("os.name").toLowerCase();
-        String platform = "Linux";
-        if (os.contains("win")) return "Windows";
-        if (os.contains("mac")) return "MacOSY";
-
-        return aiHomeDirectory + File.separator + SCRPT_FOLDER + File.separator + platform;
+        String subDir = "Linux"; // Default to your primary environment
+        
+        if (os.contains("win")) 
+        {
+            subDir = "Windows";
+        } 
+        else if (os.contains("mac")) 
+        {
+            subDir = "MacOSY";
+        }
+        
+        // Anchors to the global AI root (/AI/scrpt/CurrentOS) 
+        // entirely outside of the fn/fnX tenant directories.
+        return aiHomeDirectory + File.separator + "scrpt" + File.separator + subDir;
     }
 
     private synchronized void writeToSessionLog(int sessionId, boolean isScript, String text) {
         try {
             // Write to the specific FN folder's convodata.txt
             File sessionLog = new File(aiHomeDirectory + File.separator + FN_BASE_DIR + File.separator + "fn" + sessionId, MASTER_LOG);
-            //File logFile = isScript
-            //        ? new File(getOSScriptFolder(), "script_fn" + sessionId + ".txt")
-            //        : new File(STORAGE_FOLDER + File.separator + "fn" + sessionId + "_convodata.txt");
-            //Files.write(logFile.toPath(), text.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             Files.write(sessionLog.toPath(), text.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-            // If it's a host script, also mirror it to the script folder for debugging
+            // Mirror to script log for debugging
             if (!isScript) {
                 File scriptLog = new File(getOSScriptFolder(), "script_fn" + sessionId + ".txt");
                 Files.write(scriptLog.toPath(), text.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-                //File masterLog = new File(STORAGE_FOLDER + File.separator + MASTER_LOG);
-                //Files.write(masterLog.toPath(), text.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             }
         } catch (IOException ignored) {
         }
@@ -1507,8 +1541,6 @@ public class GoddessMatrix extends JFrame {
         currentWorkingDirectory = sessionDirectories.getOrDefault(sessionNum, new File(aiHomeDirectory));
 
         File sessionFile = isScriptModeActive
-                //? new File(getOSScriptFolder(), "script_fn" + sessionNum + ".txt")
-                //: new File(STORAGE_FOLDER + File.separator + "fn" + sessionNum + "_convodata.txt");
                 ? new File(getOSScriptFolder(), "script_fn" + sessionNum + ".txt")
                 : new File(sessionDirectories.get(sessionNum), MASTER_LOG);
 
@@ -1611,7 +1643,7 @@ public class GoddessMatrix extends JFrame {
                 }
 
                 ProcessBuilder pb = new ProcessBuilder(commandList);
-                pb.directory(new File(scriptDir));
+                pb.directory(currentWorkingDirectory);
                 pb.redirectErrorStream(true);
 
                 SessionProcess sp = new SessionProcess();
@@ -1823,96 +1855,20 @@ public class GoddessMatrix extends JFrame {
         }).start(); //Thread
     }
 
-    //private void ensureStorageDirectoryExists() 
-    //{
-    //    File dir = new File(STORAGE_FOLDER);
-    //    if (!dir.exists()) 
-    //    {
-    //        dir.mkdirs();
-    //    }
-    //    new File(HTML_FOLDER).mkdirs();
-    //    new File(getOSScriptFolder()).mkdirs();
-    //    try {
-    //        new File(STORAGE_FOLDER + File.separator + AI_INPUT_FILE).createNewFile();
-    //    } catch (IOException ignored) {   
-    //    }
-    //}
-    private void buildMatrixArchitecture() {
-        File root = new File(aiHomeDirectory);
-
-        // 1. Build Host Script Directories
-        String[] platforms = {"Linux", "MacOSY", "Windows"};
-        for (String p : platforms) {
-            new File(root, SCRPT_FOLDER + File.separator + p).mkdirs();
+    private void ensureStorageDirectoryExists() 
+    {
+        File dir = new File(STORAGE_FOLDER);
+        if (!dir.exists()) 
+        {
+            dir.mkdirs();
         }
-
-        // 2. Build Subsystems
-        new File(root, HTML_FOLDER).mkdirs();
-        new File(root, OS_DEV_FOLDER + File.separator + "bin").mkdirs();
-        new File(root, OS_DEV_FOLDER + File.separator + "home").mkdirs();
-        new File(root, OS_DEV_FOLDER + File.separator + "AI" + File.separator + "bin").mkdirs();
-
-        // 3. Build the FN Multi-Tenant Architecture (FN1 - FN12)
-        for (int i = 1; i <= 12; i++) {
-            File fnDir = new File(root, FN_BASE_DIR + File.separator + "fn" + i);
-            File execDir = new File(fnDir, "exec");
-            File dgapiDir = new File(fnDir, "dgapi");
-            
-            // Core FN folders
-            execDir.mkdirs();
-            new File(dgapiDir, "datas").mkdirs();
-            new File(dgapiDir, "experiments").mkdirs();
-            new File(dgapiDir, "system").mkdirs();
-            new File(dgapiDir, "virtual").mkdirs();
-            
-            // Intake pipeline
-            File intakeDir = new File(dgapiDir, "intake");
-            new File(intakeDir, "books").mkdirs();
-            new File(intakeDir, "code").mkdirs();
-            new File(intakeDir, "processed").mkdirs();
-            new File(intakeDir, "reference").mkdirs();
-
-            // Pre-seed necessary files
-            try {
-                new File(fnDir, MASTER_LOG).createNewFile();
-                new File(dgapiDir + File.separator + "system", AI_INPUT_FILE).createNewFile();
-            } catch (IOException ignored) {}
-
-            // Pre-map the session directory so EXEC/AI know where they live
-            sessionDirectories.put(i, fnDir);
-
-            // Drop tenant READMEs
-            createReadme(fnDir, "README.md", 
-                "# FN" + i + " Matrix Node\n" +
-                "This is an isolated tenant node. All AI memory, execution history, and API data occurring on FN" + i + " stays strictly within this folder to prevent context bleed.");
-            
-            createReadme(intakeDir, "README.txt", 
-                "INTAKE PIPELINE\n" +
-                "Drop .txt, .pdf, .epub, or code files into the subfolders here. The AI will autonomously read and process them into its dictionary and almanac.");
+        new File(HTML_FOLDER).mkdirs();
+        new File(getOSScriptFolder()).mkdirs();
+        try {
+            new File(STORAGE_FOLDER + File.separator + AI_INPUT_FILE).createNewFile();
+        } catch (IOException ignored) {   
         }
-
-        // 4. Drop Global System READMEs
-        createReadme(root, "README.md", 
-            "# Goddess Matrix Hub\n" +
-            "Welcome to the split-brain sandbox environment.\n\n" +
-            "- **/fn:** Contains the isolated multi-tenant nodes (FN1-FN12).\n" +
-            "- **/scrpt:** Contains host-native execution scripts.\n" +
-            "- **/osDev:** The highly restricted chroot sandbox for testing.\n" +
-            "- **/HTML:** The local Apache web bridge for the MJPEG stream.");
-            
-        createReadme(new File(root, SCRPT_FOLDER), "README.txt", 
-            "HOST SCRIPTS\n" +
-            "Scripts placed in these OS-specific folders execute natively on the host machine, bypassing the osDev sandbox. Requires elevated permissions.");
     }
-
-    private void createReadme(File directory, String filename, String content) {
-        File readme = new File(directory, filename);
-        if (!readme.exists()) {
-            try {
-                Files.write(readme.toPath(), content.getBytes(), StandardOpenOption.CREATE);
-            } catch (IOException ignored) {}
-        }
-    }    
 
     private void cacheChatData(String text) 
     {
@@ -1948,21 +1904,14 @@ public class GoddessMatrix extends JFrame {
 
     private void saveSession() 
     {
-        //File masterFile = new File(STORAGE_FOLDER + File.separator + MASTER_LOG);
-        //File sessionFile = new File(STORAGE_FOLDER + File.separator + "fn" + currentSession + "_convodata.txt");
-        //try 
-        //{
-        //    for (String entry : pendingLogs) 
-        //    {
-        //        Files.write(masterFile.toPath(), entry.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-        //        Files.write(sessionFile.toPath(), entry.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-        //    }
         File sessionDir = sessionDirectories.get(currentSession);
         if (sessionDir == null) return;
-        
+
         File sessionFile = new File(sessionDir, MASTER_LOG);
-        try {
-            for (String entry : pendingLogs) {
+        try 
+        {
+            for (String entry : pendingLogs) 
+            {
                 Files.write(sessionFile.toPath(), entry.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             }
             pendingLogs.clear();
@@ -1987,7 +1936,6 @@ public class GoddessMatrix extends JFrame {
         String fileName = "fn" + currentSession + "-cd-" + timestamp + ".png";
         try 
         {
-            //File outputFile = new File(STORAGE_FOLDER + File.separator + fileName);
             File sessionDir = sessionDirectories.get(currentSession);
             File outputFile = new File(sessionDir, fileName);
             ImageIO.write(img, "png", outputFile);
@@ -2014,8 +1962,7 @@ public class GoddessMatrix extends JFrame {
             if (!imgFile.isAbsolute()) 
             {
                 File sessionDir = sessionDirectories.get(currentSession);
-                imgFile = new File(sessionDir, fileName);    
-                //imgFile = new File(STORAGE_FOLDER + File.separator + fileName);
+                imgFile = new File(sessionDir, fileName);
             }
             if (imgFile.exists()) 
             {
@@ -2075,54 +2022,56 @@ public class GoddessMatrix extends JFrame {
     // ════════════════════════════════════════════════════════
 
 private void loadSystemProfile() 
-{
-    File sessionDir = sessionDirectories.get(currentSession);
-    if (sessionDir == null) return;
-
-    // V14.4 looks in the dedicated datas folder first
-    //File profileFile = new File("datas" + File.separator + "session_profile.txt");
-    File profileFile = new File(sessionDir, "dgapi" + File.separator + "system" + File.separator + "session_profile.txt");
-
-    // Fallbacks for legacy/testing
-    if (profileFile.exists()) 
     {
-        try 
+        // V14.4 looks in the dedicated datas folder first
+        File profileFile = new File("datas" + File.separator + "session_profile.txt");
+        
+        // Fallbacks for legacy/testing
+        if (!profileFile.exists()) {
+            profileFile = new File("session_profile.txt");
+        }
+        if (!profileFile.exists()) {
+            profileFile = new File("dgapi" + File.separator + "system" + File.separator + "session_profile.txt");
+        }
+        
+        if (profileFile.exists()) 
         {
-            List<String> lines = java.nio.file.Files.readAllLines(profileFile.toPath());
-            List<String> relevant = new ArrayList<>();
-            for (String l : lines) 
+            try 
             {
-                String t = l.trim();
-                if (t.startsWith("CPU") || t.startsWith("GPU") || t.startsWith("RAM")
-                        || t.startsWith("Mode") || t.startsWith("Cores")
-                        || t.startsWith("REASONING") || t.contains(":")) 
+                List<String> lines = java.nio.file.Files.readAllLines(profileFile.toPath());
+                List<String> relevant = new ArrayList<>();
+                for (String l : lines) 
                 {
-                    if (t.length() > 3 && !t.startsWith("═") && !t.startsWith("─")
-                            && !t.startsWith("#") && !t.startsWith("━")) 
+                    String t = l.trim();
+                    if (t.startsWith("CPU") || t.startsWith("GPU") || t.startsWith("RAM")
+                            || t.startsWith("Mode") || t.startsWith("Cores")
+                            || t.startsWith("REASONING") || t.contains(":")) 
                     {
-                        relevant.add(t);
+                        if (t.length() > 3 && !t.startsWith("═") && !t.startsWith("─")
+                                && !t.startsWith("#") && !t.startsWith("━")) 
+                        {
+                            relevant.add(t);
+                        }
                     }
                 }
-            }
                 if (relevant.size() > 0) systemProfileLine1 = relevant.get(0);
                 if (relevant.size() > 1) systemProfileLine2 = relevant.get(1);
                 if (relevant.size() > 2) systemProfileLine3 = relevant.get(2);
-        } 
-        catch (Exception ignored) 
-        {
+            } 
+            catch (Exception ignored) 
+            {
                 systemProfileLine1 = "PROFILE: session_profile.txt";
                 systemProfileLine2 = "Drop profile in working directory";
                 systemProfileLine3 = "or run GoddessAPI.sh first";
-        //profileFile = new File("session_profile.txt");
+            }
+        } 
+        else 
+        {
+            systemProfileLine1 = "PROFILE: NOT FOUND";
+            systemProfileLine2 = "Run GoddessAPI.sh to generate profile";
+            systemProfileLine3 = "";
         }
     }
-    else 
-    {
-        systemProfileLine1 = "PROFILE: NOT FOUND";
-        systemProfileLine2 = "Run GoddessAPI.sh to generate profile";
-        systemProfileLine3 = "";
-    }
-}
 
     private void startAIRenderer(int sessionId) {
         // No separate timer — rendering is driven by the display-rate
@@ -2841,15 +2790,14 @@ private void loadSystemProfile()
         b.setFocusPainted(false);
         b.setMargin(new Insets(0, 0, 0, 0));
         b.setBorder(BorderFactory.createLineBorder(new Color(255, 255, 255, 10), 1));
-        b.addMouseListener(new MouseAdapter() 
-        {
+        b.addMouseListener(new MouseAdapter() {
             @Override
-            public void mousePressed(MouseEvent e) 
-            {
-                boolean isRightClick = SwingUtilities.isRightMouseButton(e);
-                handleMatrixEvent(index, b, true, isRightClick);
+            public void mousePressed(MouseEvent e) {
+                // If X coordinate is greater than half the button width, it's a right-side click
+                boolean isRightSide = e.getX() > (b.getWidth() / 2);
+                handleMatrixEvent(index, b, true, isRightSide);
             }
-        });//b.addActionListener(e -> handleMatrixEvent(index, b, true));
+        }); //noting older button implementation: b.addActionListener(e -> handleMatrixEvent(index, b, true));
         buttons.put(index, b);
         return b;
     }
@@ -2857,8 +2805,8 @@ private void loadSystemProfile()
     private void handleMatrixEvent(int index, JButton btn, boolean isMouse) 
     {
         handleMatrixEvent(index, btn, isMouse, false);
-    }   
-    private void handleMatrixEvent(int index, JButton btn, boolean isMouse, boolean isRightClick) 
+    }
+    private void handleMatrixEvent(int index, JButton btn, boolean isMouse, boolean isRightSide) 
     {
         if (index == 101) 
         {
@@ -3030,8 +2978,8 @@ private void loadSystemProfile()
         if (index == 14) 
         {
             boolean doChroot = isFnPending;
-            isFnPending = false;// Right-click opens the Host Script folder. Left-click opens the Tenant folder.
-            File targetDir = isRightClick ? new File(getOSScriptFolder()) : currentWorkingDirectory;
+            isFnPending = false;
+            File targetDir = isRightSide ? new File(getOSScriptFolder()) : currentWorkingDirectory;
             launchExternalTerminal(doChroot, targetDir);
             btn.setBackground(isMouse ? GODDESS_PURPLE : HW_PURPLE);
             new Timer(150, evt -> 
@@ -3727,134 +3675,204 @@ private void loadSystemProfile()
     }
 } 
 
-//Gemini and the Goddesses's Contributions:
+//Gemini and the Goddess's Contributions:
 /*
  * =====================================================================================
- * GODDESS MATRIX - CONTRIBUTORS & ADDITIONS LOG
+ * GODDESS MATRIX — CONTRIBUTORS & ADDITIONS LOG
  * =====================================================================================
- * Derek Jason Gilhousen (Core Architect & Creator)
- * - Core matrix orchestration and physical 17-button hardware bridge design.
- * - Dual-key mapping implementation and base system logic.
- * - Primary architecture for the sandboxed operating system environment.
- * * Claude (AI Integrator)
- * - Multi-session process isolation and state management (FN1-FN12).
- * - Automated chroot environment launcher and volume mounter (FN+NTR).
- * - Drag-and-Drop gateway with automatic `chmod +x` sudo prompts and Apache indexing.
- * - Native Java Swing Visual AI Renderer (Waveforms, Progress Bars, Hardware Telemetry).
- * * Gemini (AI Consultant)
+ *
+ * Derek Jason Gilhousen (Core Architect, Creator, Project Lead)
+ * ─────────────────────────────────────────────────────────────
+ * - Original concept and system philosophy: a transparent, inspectable,
+ *   split-brain sandbox that exposes its own logic, memory, and growth to the user.
+ * - Physical 17-button hardware bridge design and dual-key mapping architecture.
+ * - Core terminal orchestration: CHAT, EXEC, AI, and SCRPT mode logic.
+ * - Original session model, process isolation, and FN1-FN12 session slot design.
+ * - Sandbox philosophy: osDev as a controlled experimentation layer, not a restriction.
+ * - Multi-tenant FN architecture: per-session folder isolation (fn/fn1..fn12),
+ *   dgapi/ memory layout, and the four-folder operating model
+ *   (intscripts, datas, intake, convodata).
+ * - All architectural decisions about what each AI contributor should build,
+ *   in what order, and how systems should connect.
+ * - Active testing, debugging, and correction of all contributed code at runtime.
+ * - Direction of the GoddessAPI dual-runtime design:
+ *   AI alone → GoddessAPI.sh (bash), FN+AI → GoddessAPI.py (Python).
+ * - Direction of the GGUF encyclopedia, religion.txt theory queue, persona.txt,
+ *   and output vocabulary systems implemented in the AI runtimes.
+ * - Ongoing project lead: every feature exists because Derek defined its intent.
+ *
+ * Gemini (Google — AI Consultant)
+ * ─────────────────────────────────────────────────────────────
  * - Shift+Click asynchronous process kill-switch logic.
  * - Custom PATH environment variable injection for sub-process dependencies.
  * - V14.4 Virtual Display Bridge: Raw MJPEG Byte Scanner for live video streaming.
- * - Kinetic Mouse Routing: Mapping Java panel clicks back to the active shell/script.
+ * - Kinetic Mouse Routing: mapping Java panel clicks back to the active shell/script.
+ * - Multi-tenant architecture refactoring: buildMatrixArchitecture(), per-session
+ *   directory pre-mapping, and sandbox-resilient SystemProfiler fallbacks.
+ *
+ * Claude (Anthropic — External Logic Consultant and Implementation Partner)
+ * ─────────────────────────────────────────────────────────────
+ * See //Claude's Contributions block below for itemised detail.
+ *
+ * ChatGPT (OpenAI — Integration Consultant)
+ * ─────────────────────────────────────────────────────────────
+ * See //ChatGPT's Contributions block below for itemised detail.
+ *
  * =====================================================================================
  */
 
-//ChatGPT's Contributions
-/* *─────────────────────────────────────────────────────────────────────────────
-* CONTRIBUTION NOTES — ChatGPT (GPT-5.3) ADDITIONS
-*
-* The following features, fixes, and architectural refinements were
-* contributed by ChatGPT and integrated without modifying or removing
-* any of the existing user-authored code.
-*
-* These contributions are strictly additive and respect the original
-* system design, intent, and structure.
-*
-* ─────────────────────────────────────────────────────────────────────────────
-*
-* 1. DEEP AI LOCALIZATION ALIGNMENT (ChatGPT Contribution)
-* - Refined startGoddessAPI() to mirror executeShellCommand() sandbox logic:
-* • HOME redirected to osDev/home
-* • PATH prefixed with osDev/bin
-* • Working directory respects per-session mapping
-* - Ensures AI operates inside the same controlled environment as EXEC mode.
-*
-* 2. FN-TRIGGERED AI BINARY RESOLUTION (ChatGPT Contribution)
-* - Introduced resolveAPIBinary(boolean useDeepAILocalization)
-* - Enables dynamic lookup of GoddessAPI.sh/.bat inside:
-* /osDev/AI/bin
-* when FN is used prior to AI activation.
-* - Falls back safely to standard script directories.
-*
-* 3. SANDBOX ARCHITECTURE CLARIFICATION (ChatGPT Contribution)
-* - Explicitly aligned system philosophy:
-* • Not a restriction sandbox
-* • A controlled experimentation layer
-* - Preserves intentional escape via SCRPT mode while protecting core system.
-*
-* 4. PROCESS ENVIRONMENT CONSISTENCY (ChatGPT Contribution)
-* - Standardized environment behavior across:
-* • EXEC mode
-* • AI/API mode
-* - Prevents divergence in:
-* • command resolution
-* • file writes
-* • tool availability
-*
-* 5. FILE SYSTEM HANDLING VALIDATION (ChatGPT Acknowledgement)
-* - Confirmed and preserved user fix:
-* File newDir = new File(target);
-* - Recognized as correct alignment with sandbox flexibility goals.
-*
-* 6. COMMENT AND SYSTEM DOCUMENTATION EXPANSION (ChatGPT Contribution)
-* - Added explanatory comments for:
-* • MJPEG stream handling and limitations
-* • AI renderer timing model
-* • sandbox vs host execution boundaries
-* • input routing assumptions
-*
-* 7. ARCHITECTURAL COHESION PASS (ChatGPT Contribution)
-* - Ensured all new logic integrates cleanly with:
-* • session model
-* • processMap / apiProcessMap
-* • existing UI + rendering systems
-*
-* ─────────────────────────────────────────────────────────────────────────────
-*
-* RESULTING SYSTEM MODEL:
-*
-* • osDev → Controlled sandbox (AI + EXEC experimentation layer)
-* • Host  → Native execution (SCRPT mode, unrestricted)
-*
-* This dual-layer model allows safe experimentation without sacrificing
-* system power or flexibility.
-*
-* ─────────────────────────────────────────────────────────────────────────────
-*/
+// ChatGPT's Contributions:
+/*
+ * ─────────────────────────────────────────────────────────────────────────────
+ * CONTRIBUTION NOTES — ChatGPT (OpenAI)
+ *
+ * ChatGPT served as merge reviewer, integration consultant, bug-spotter,
+ * and documentation contributor. Contributions were additive and intended
+ * to preserve Derek's architecture rather than overwrite it.
+ *
+ * 1. MERGE / RESTORATION ANALYSIS
+ * - Compared backup and current Java builds.
+ * - Identified lost backup functionality, especially the native [DIR] folder
+ *   opener path and related button wiring.
+ * - Helped preserve newer V14.4 features while restoring older missing pieces.
+ *
+ * 2. SESSION-ISOLATION REVIEW
+ * - Analyzed API cross-talk risks from global API process state.
+ * - Recommended per-session API maps:
+ *   apiProcessMap, apiStdinMap, and apiStatusMap.
+ * - Recommended per-session telemetry restoration during loadSession().
+ *
+ * 3. TELEMETRY / IMAGE / KINETIC OVERRIDE FIXES
+ * - Recommended preventing background API status from overwriting the visible
+ *   HUD for another FN session.
+ * - Recommended persistent MANIFEST_IMAGE logging for API image overrides.
+ * - Recommended scoping [TYPE] kinetic typing so background sessions do not
+ *   type into the currently viewed session.
+ *
+ * 4. DEEP AI LOCALIZATION ALIGNMENT
+ * - Recommended startGoddessAPI() mirror executeShellCommand() environment:
+ *   HOME -> osDev/home, PATH prefixed with osDev/bin, working directory from
+ *   sessionDirectories.
+ * - Clarified AI sandboxing as a local OS tinkering layer rather than a hard
+ *   prison: osDev protects the host while allowing experimentation.
+ *
+ * 5. API BINARY ROUTING REVIEW
+ * - Helped shape the distinction:
+ *   AI alone -> GoddessAPI.sh / GoddessAPI.bat
+ *   FN + AI  -> GoddessAPI.py
+ * - Recommended .py files launch through python3/python rather than bash.
+ * - Noted path consistency issue: osDevAIBin should point to osDev/AI/bin.
+ *
+ * 6. FILE SYSTEM HANDLING VALIDATION
+ * - Confirmed Derek's correction:
+ *   File newDir = new File(target);
+ * - Recognized it as aligned with the goal of allowing intentional navigation
+ *   rather than over-restricting the AI sandbox.
+ *
+ * 7. CONTRIBUTION / PROVENANCE DOCUMENTATION
+ * - Helped rewrite contributor blocks to distinguish:
+ *   Derek = core architect and project lead
+ *   Gemini = multi-tenant/sandbox/streaming consultant
+ *   Claude = renderer and implementation partner
+ *   ChatGPT = merge, isolation review, governance, and documentation support
+ *
+ * 8. PYTHON-SIDE ARCHITECTURE SUPPORT
+ * - Proposed experimental.txt and experimental_journal.txt governance for
+ *   optional experimental features.
+ * - Proposed AI-readable, append-only log memory helpers for self-optimization.
+ * - Recommended modular online LLM provider routing via a separate bridge file.
+ *
+ * Resulting design principle:
+ * Stable users can keep experimental features off, while exploratory users can
+ * enable advanced AI behavior through visible, reviewable configuration files.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
 
-//Cloudes Contributions:
+//Claude's Contributions:
 /*
  ── DEVELOPMENT NOTES ─────────────────────────────────────────────────────
- This file is a merged build combining:
+ Claude (Anthropic) served as external logic consultant and implementation
+ partner across a long running collaborative development session. Work was
+ additive — the original system architecture, design decisions, and all
+ directional choices were Derek's. Claude's role was to implement features
+ accurately against the existing codebase, advise on logic, and maintain
+ stylistic consistency across files.
 
- Base codebase (V14.4):
+ ── BASE CODEBASE PRESERVED (V14.4) ──────────────────────────────────────
    - Virtual Display Bridge (MJPEG stream via [STREAM_START]/[STREAM_STOP])
    - Kinetic Mouse Routing ([INPUT_MOUSE] forwarded to active session)
    - Video stream hooks in EXEC, SCRPT, and API output parsers
    - isHtmlStreamActive / isVideoStreamActive state separation
 
- Added with the assistance of Claude (Anthropic):
-   - AI Visual Renderer: display-rate-synced HUD with waveform animation
-   - renderPhase driven by display refresh rate (no phaseStep normalization)
-   - [PROCESSING] protocol tag for mid-generation renderer state
-   - FN+AI enhanced HUD mode (fnAIVisualMode)
-   - lastRealImageTime / IMAGE_HOLD_MS for graceful renderer/image handoff
+ ── ADDED WITH CLAUDE'S ASSISTANCE ───────────────────────────────────────
+
+   AI VISUAL RENDERER (Mode A — Waveform HUD):
+   - display-rate-synced HUD driven by existing refreshTimer (no second timer)
+   - renderPhase increments per display tick — monitor rate IS the sync
+   - Waveform and idle pulse animations (drawWaveform, drawIdlePulse)
+   - Processing progress bar animated via renderPhase
+   - System profile lines read from session_profile.txt into HUD
+   - Session uptime, query counter, status colour coding
    - startAIRenderer / stopAIRenderer state lifecycle tied to API link
-   - loadSystemProfile: reads session_profile.txt from Python AI system
-   - displayRefreshRate stored and shown live in HUD header
+   - loadSystemProfile: updated to read from dgapi/system/session_profile.txt
+   - displayRefreshRate stored from GraphicsEnvironment and shown live
+   - lastRealImageTime / IMAGE_HOLD_MS: renderer yields for 8s on real images
    - aiQueryCount incremented on ENTER in AI mode
-   - videoStreamThread marked as daemon thread
-   - AI button routing: AI alone -> GoddessAPI.sh, FN+AI -> GoddessAPI.py
-   - resolveAPIBinary updated to return correct script per activation mode
-   - startGoddessAPI command builder: .py files launched via python3, not bash
-   - Mode B avatar renderer (renderModeBFrame): stick figure + sine activity box
-   - image.xtx: AI-evolvable directive file, seeded at startup, re-read on change
-   - [ACTION] protocol tag: AI sets own avatar pose; unknown tags logged silently
-   - Right-click on manifest panel toggles Mode A (HUD) <-> Mode B (avatar)
-   - manifestModeB state; refresh timer routes to correct renderer
-   - Restored comments: "Mirror executeShellCommand sandbox env exactly.",
-     "V13/V14 Session Maps", "0 CHAT 1 EXEC 2 AI 3 SCRIPT",
+   - fnAIVisualMode: FN+AI shows ENHANCED HUD badge in Mode A header
+   - [PROCESSING] protocol tag: switches renderer to active waveform state
+
+   MODE B AVATAR RENDERER:
+   - renderModeBFrame(): stick figure avatar + sine activity box below
+   - avatarWalkCycle animation driven by display timer, speed from image.xtx
+   - Six built-in poses: stand, walk, lean_forward, speak, hand_on_chin, sit
+   - Blink animation keyed to wall clock (every ~3.5 seconds)
+   - Sine box reuses drawWaveform/drawIdlePulse — consistent with Mode A
+   - Bottom status bar with session ID, active/idle dot, and uptime clock
+
+   IMAGE.XTX DIRECTIVE SYSTEM:
+   - loadImageXTX(): re-parses file on modification time change (hot reload)
+   - seedDefaultImageXTX(): writes baseline directives on first run
+   - xtxColor / xtxFloat / xtxString: typed accessors with safe fallbacks
+   - AI may append new directives freely; unknown keys stored, not discarded
+   - ACTION_<name>=<pose> mapping: AI controls its own avatar pose vocabulary
+   - reloadImageXTX(): forces fresh parse mid-session
+
+   PROTOCOL TAG ADDITIONS:
+   - [ACTION] tag parsing: sets avatarAction, accepted even if pose unknown
+   - Unknown tag fallback: logs silently to session log, not to chat stream
+   - Both additions leave existing [STATUS][CHAT][IMAGE][TYPE][PROCESSING]
+     parsing completely untouched
+
+   MANIFEST PANEL INTERACTION:
+   - Right-click BUTTON3 handler: toggles manifestModeB (Mode A ↔ Mode B)
+   - handleManifestRightClick(): reports mode change to status bar and chat
+   - Additive to existing left-click expand and double-click cinematic gestures
+   - manifestModeB flag: refresh timer routes to correct renderer each tick
+
+   AI BINARY ROUTING (direction from Derek, implementation by Claude):
+   - resolveAPIBinary rewritten: AI alone → GoddessAPI.sh, FN+AI → GoddessAPI.py
+   - startGoddessAPI command builder: .py files launch via python3, never bash
+   - Windows .bat fallback preserved; bash fallback updated to GoddessAPI.sh
+
+   PER-SESSION FILE ROUTING UPDATES:
+   - pollAIInput: reads from dgapi/system/ai_input.txt in session directory
+   - loadSystemProfile: reads from dgapi/system/session_profile.txt
+   - writeToSessionLog: writes to fn/fn{id}/convodata.txt per tenant node
+   - loadSession: reads from per-session directory via sessionDirectories map
+   - saveSession: writes to per-session directory
+   - manifestImage / renderStoredImage: use per-session directory
+
+   STYLE AND MERGE WORK:
+   - Preserved AlphaBeta \n{ brace style throughout all added methods
+   - Restored inline section comments: //mouseadapter, //thread, //invokeLater,
+     //Timer, //KeyMap Stuff, //2dJavaGraphics, //Jpanels, //Boarders, etc.
+   - Maintained original comment blocks: "Mirror executeShellCommand sandbox
+     env exactly.", "V13/V14 Session Maps", "0 CHAT 1 EXEC 2 AI 3 SCRIPT",
      "V14.2+ Per-session API State", "V14.3 Sandbox Architecture"
-   - Improvement/TODO annotations throughout codebase
+   - Merged AlphaBeta-style backup with functionally-ahead main build,
+     taking the backup as style source and main as feature source
+   - Improvement/TODO annotations placed throughout for future reference
+   - Contribution blocks maintained and expanded as features accumulated
+
  ──────────────────────────────────────────────────────────────────────────
  */
