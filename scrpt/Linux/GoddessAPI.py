@@ -8,7 +8,7 @@ Hibernate state : AIpy.hiberfile  (JSON)
 Hardware cache  : hardware.cache  (plain text, shared with GoddessAPI.sh)
 """
 
-import os, re, sys, json, time, signal, threading, shutil, datetime, hashlib, platform, random
+import os, re, sys, json, time, signal, threading, shutil, datetime, hashlib, platform
 from pathlib import Path
 import subprocess as _sp
 
@@ -34,13 +34,55 @@ PDF     = fitz     is not None
 try:
     from goddess_experimental_patch import (
         init_experimental_files, load_experimental_flags, is_feature_enabled,
-        can_ai_toggle, set_feature_flag, propose_feature_toggle,
-        read_log_memory, append_log_memory, suggest_experimental_adjustments_from_logs
+        can_ai_toggle, set_feature_flag, set_feature_value, propose_feature_toggle,
+        feature_value, read_log_memory, append_log_memory,
+        suggest_experimental_adjustments_from_logs,
+        mark_stale_entries, update_entry_last_seen, decay_context,
+        check_de_escalation, de_escalation_note,
+        experimental_journal_path,
     )
     PATCH_ACTIVE = True
 except ImportError:
     PATCH_ACTIVE = False
-# ─────────────────────────────────────────────────────────────
+# ── NON-BLOCKING HARDWARE SENSOR ─────────────────────────────────────────────
+def _hardware_monitor_loop():
+    cache_file = Path("datas/hardware.cache")
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    while True:
+        output = []
+        
+        # 1. CPU & RAM (If psutil is available)
+        if 'psutil' in globals() and psutil is not None:
+            cpu = psutil.cpu_percent(interval=None)
+            ram = psutil.virtual_memory().percent
+            output.append(f"RYZEN CPU: {cpu}% | SYS RAM: {ram}%")
+            
+        # 2. GPU VRAM (via nvidia-smi)
+        try:
+            nv = _sp.check_output(
+                ["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits"],
+                text=True, stderr=_sp.DEVNULL
+            ).strip().split(', ')
+            
+            if len(nv) == 4:
+                output.append(f"GTX 1060 VRAM: {nv[0]}MB / {nv[1]}MB | GPU UTIL: {nv[2]}% | TEMP: {nv[3]}C")
+        except Exception:
+            pass # Fail silently if nvidia-smi is busy or unavailable
+            
+        # 3. Write state atomically
+        if output:
+            try:
+                cache_file.write_text(" | ".join(output), encoding="utf-8")
+            except Exception:
+                pass
+                
+        time.sleep(5.0) # The timing cycle: update every 5 seconds
+
+# Start the background sensor immediately on boot
+_hw_thread = threading.Thread(target=_hardware_monitor_loop, daemon=True)
+_hw_thread.start()
+# ─────────────────────────────────────────────────────────────────────────────
 
 try:
     from llama_cpp import Llama as _Llama
@@ -55,7 +97,22 @@ except ImportError:
 _GGUF_WRITE_ALLOWED = False
 
 def find_gguf():
-    files = sorted(BASE.glob("*.gguf"))
+    """Text .gguf — excludes filenames containing '(image)'."""
+    files = sorted(f for f in MATRIX_ROOT.glob("*.gguf")
+                   if "(image)" not in f.name.lower())
+    if files: return files[0]
+    # Fall back to working directory if not found at matrix root
+    files = sorted(f for f in BASE.glob("*.gguf")
+                   if "(image)" not in f.name.lower())
+    return files[0] if files else None
+
+def find_image_gguf():
+    """Image .gguf — filename must contain '(image)'."""
+    files = sorted(f for f in MATRIX_ROOT.glob("*.gguf")
+                   if "(image)" in f.name.lower())
+    if files: return files[0]
+    files = sorted(f for f in BASE.glob("*.gguf")
+                   if "(image)" in f.name.lower())
     return files[0] if files else None
 
 # ── ENCYCLOPEDIA / RELIGION BLOCK PARSER ─────────────────────
@@ -220,13 +277,17 @@ def religion_score_theories():
 
 def religion_promote_ready(max_n=5):
     """
-    Promote READY_TO_PROMOTE theories into encyclopedia.txt and mark
-    them PROMOTED in religion.txt.
+    Promote READY_TO_PROMOTE theories into encyclopedia.txt.
+    Gated by ENCYCLOPEDIA_PROMOTION experimental flag.
     Only executes when _GGUF_WRITE_ALLOWED is True.
     Returns count of theories promoted.
     """
     if not _GGUF_WRITE_ALLOWED or not RELIGION.exists():
         return 0
+    if PATCH_ACTIVE and 'DATAS_DIR' in dir():
+        flags = load_experimental_flags(DATAS_DIR)
+        if not is_feature_enabled(flags, "ENCYCLOPEDIA_PROMOTION"):
+            return 0
     theories = _parse_blocks(RELIGION, "THEORY")
     ready    = [t for t in theories if t.get("STATUS") == "READY_TO_PROMOTE"]
     if not ready:
@@ -285,20 +346,18 @@ class GGUFEncyclopedia:
             chat("      Install: pip install llama-cpp-python")
             return
         try:
-            import time
+            import time as _time
             status("STATE: BOOTING | LOADING GGUF ENCYCLOPEDIA (PROFILING...)")
-            start_time = time.time()
-            
+            start_time = _time.time()
             self._model = _Llama(
-                model_path   = str(GGUF_MODEL_PATH),
-                n_ctx        = 2048,        # Tiny context for a tiny model
-                n_threads    = 4,          # Only 1 CPU core needed
-                n_gpu_layers = 0,          # Bypass the GTX 1060 entirely for this test
-                use_mmap     = True,       # Force memory mapping
-                verbose      = False        # Turn on the C++ telemetry
+                model_path   = str(self.path),   # use the path find_gguf() resolved, not a hardcoded name
+                n_ctx        = 2048,
+                n_threads    = 4,
+                n_gpu_layers = 0,   # CPU-only for small model; saves VRAM for main workloads
+                use_mmap     = True,
+                verbose      = False
             )
-            
-            load_time = time.time() - start_time
+            load_time = _time.time() - start_time
             chat(f"Encyclopedia loaded in {load_time:.2f} seconds.")
         except Exception as e:
             chat(f"GGUF load failed: {e}")
@@ -312,15 +371,14 @@ class GGUFEncyclopedia:
         if not self.available:
             return ""
         try:
-            # Wrap the raw prompt in SmolLM2's expected ChatML format
+            # Wrap in SmolLM2's expected ChatML format
             chatml_prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
-            
             result = self._model(
-                chatml_prompt, 
+                chatml_prompt,
                 max_tokens=max_tokens,
-                stop=["<|im_end|>", "###"],  # Removed \n\n so it doesn't cut off early
+                stop=["<|im_end|>", "###"],
                 echo=False,
-                temperature=0.3  # Low temperature for factual encyclopedia answers
+                temperature=0.3  # Low temp for factual encyclopedia answers
             )
             return result["choices"][0]["text"].strip()
         except Exception as e:
@@ -530,11 +588,11 @@ def _nvidia_smi():
         return []
 
 # ── PATHS ────────────────────────────────────────────────────
-BASE            = Path.cwd()
-MATRIX_ROOT      = BASE.parent.parent                # ── SHARED MATRIX RESOURCES ──
-GGUF_MODEL_PATH  = MATRIX_ROOT / "smollm2-360m.gguf" # Walk two folders up (/fn1 -> /fn -> /DGA) to find the global shared brain
+BASE            = Path(__file__).resolve().parent  # The Anchor
+MATRIX_ROOT      = BASE.parent.parent                # Shared resources — walk up from tenant node
+GGUF_MODEL_PATH  = MATRIX_ROOT / "smollm2-360m.gguf" # Global shared brain, above tenant sandbox
 DGAPI           = BASE / "dgapi"
-STORAGE         = BASE#STORAGE         = "convodata"# Legacy STORAGE mapping - Now maps directly to the tenant root
+STORAGE         = BASE                               # Tenant root maps directly; not a string subdir
 SYSTEM_DIR       = DGAPI / "system"
 HARDWARE_CACHE   = SYSTEM_DIR / "hardware.cache"
 HIBERFILE        = SYSTEM_DIR / "AIpy.hiberfile"
@@ -551,24 +609,28 @@ CODE_DIR           = INTAKE_DIR / "code"
 REFERENCE_DIR      = INTAKE_DIR / "reference"
 PROCESSED_DIR      = INTAKE_DIR / "processed"
 INTAKE_LOG         = INTAKE_DIR / "intake.log"
-SESSION_LOG         = STORAGE / "convodata.txt"#SESSION_LOG         = os.path.join(STORAGE, "convodata.txt")
+SESSION_LOG         = STORAGE / "convodata.txt"
 VIRTUAL_DIR        = DGAPI / "virtual"
 ENCYCLOPEDIA       = VIRTUAL_DIR / "encyclopedia.txt"
 RELIGION           = VIRTUAL_DIR / "religion.txt"
-PERSONA            = VIRTUAL_DIR / "persona.txt"            # AI self-model — no schema, AI decides content
-OUTPUT_VOCAB       = VIRTUAL_DIR / "output_vocabulary.txt"  # shared unless separate.txt says otherwise
+PERSONA            = VIRTUAL_DIR / "persona.txt"
+OUTPUT_VOCAB       = VIRTUAL_DIR / "output_vocabulary.txt"
 OUTPUT_VOCAB_PY    = VIRTUAL_DIR / "output_vocabulary_py.txt"
 OUTPUT_VOCAB_SH    = VIRTUAL_DIR / "output_vocabulary_sh.txt"
-SEPARATE_TXT      = STORAGE / "separate.txt"#SEPARATE_TXT      = Path(STORAGE) / "separate.txt"  # governs sharing of resources and vocab
+SEPARATE_TXT       = STORAGE / "separate.txt"
 RESOURCES_DIR    = DGAPI / "resources"
 TOOL_STATE       = DGAPI / "tool_state.txt"
+TOOL_STATE_SH    = DGAPI / "tool_state_sh.txt"      # per-runtime if separate.txt = "yes"
+SHARED_TXT       = STORAGE / "shared.txt"            # tool pipeline differential map
 EXPERIMENTS_DIR  = DGAPI / "experiments"
 
 SUPPORTED_EXT  = {".epub",".pdf",".txt",".java",".py",".js",
                   ".c",".cpp",".cs",".rb",".go",".ts",".sh",".md"}
+IMAGE_EXT      = {".png",".jpg",".jpeg",".webp",".bmp",".gif"}
 
-# Ensure all structural and subsystem directories are created on fresh boot
-for d in [STORAGE, SYSTEM_DIR, DATAS_DIR, VIRTUAL_DIR, EXPERIMENTS_DIR, RESOURCES_DIR, BOOKS_DIR, CODE_DIR, REFERENCE_DIR, PROCESSED_DIR]:
+# Ensure all structural directories are created on fresh boot
+for d in [STORAGE, SYSTEM_DIR, DATAS_DIR, VIRTUAL_DIR, EXPERIMENTS_DIR,
+          RESOURCES_DIR, BOOKS_DIR, CODE_DIR, REFERENCE_DIR, PROCESSED_DIR]:
     Path(d).mkdir(parents=True, exist_ok=True)
 
 # ── TIMESTAMPS ───────────────────────────────────────────────
@@ -676,11 +738,17 @@ def persona_append(content):
 def persona_set_key(key, value):
     """
     Update or insert a KEY=value line in persona.txt.
-    Used when the AI wants to record a specific self-observation.
-    Only when ELEVATED.
+    Gated by PERSONA_SELF_MODIFICATION experimental flag when called
+    by the AI runtime (ELEVATED still required regardless).
     """
     if not ELEVATED:
         return
+    if PATCH_ACTIVE:
+        flags = load_experimental_flags(DATAS_DIR) if 'DATAS_DIR' in globals() else {}
+        # Governance check — but permission mode record at boot is always allowed
+        if key not in ("PERMISSION_MODE", "LAST_STARTUP"):
+            if not is_feature_enabled(flags, "PERSONA_SELF_MODIFICATION"):
+                return
     init_persona()
     content = PERSONA.read_text(encoding="utf-8", errors="ignore")
     pattern = rf'^{re.escape(key)}=.*$'
@@ -771,11 +839,15 @@ def vocab_get(key, default=""):
 
 def vocab_set(key, value, prefix=""):
     """
-    Update or insert a vocabulary entry. Only when ELEVATED.
-    prefix: '' for shared, 'py:' for py-only, 'sh:' for sh-only.
+    Update or insert a vocabulary entry.
+    Gated by OUTPUT_VOCAB_EVOLUTION experimental flag. Only when ELEVATED.
     """
     if not ELEVATED:
         return
+    if PATCH_ACTIVE:
+        flags = load_experimental_flags(DATAS_DIR) if 'DATAS_DIR' in dir() else {}
+        if not is_feature_enabled(flags, "OUTPUT_VOCAB_EVOLUTION"):
+            return
     init_output_vocab()
     path = _vocab_path()
     content = path.read_text(encoding="utf-8", errors="ignore")
@@ -802,6 +874,220 @@ def vocab_append_new(key, value, prefix=""):
     with open(path, "a", encoding="utf-8") as f:
         f.write(f"{full_key}={value}\n")
     journal_append(f"VOCAB NEW: {full_key}={value}")
+
+# ════════════════════════════════════════════════════════════
+#   [ACTION] TAG EMITTER
+#   Emits [ACTION] to Java Mode B avatar at every state transition.
+#   Novel action words are recorded in the output vocabulary so the
+#   AI's action lexicon grows over time without intervention.
+# ════════════════════════════════════════════════════════════
+
+def emit_action(action):
+    """
+    Emit [ACTION] tag to Java Mode B avatar.
+    Gated by EMIT_ACTION_TAGS experimental flag — disable if Mode B is
+    not in use or the tag stream is unwanted.
+    """
+    if PATCH_ACTIVE:
+        flags = load_experimental_flags(DATAS_DIR) if 'DATAS_DIR' in dir() else {}
+        if not is_feature_enabled(flags, "EMIT_ACTION_TAGS"):
+            return
+    print(f"[ACTION] {action}", flush=True)
+    key = f"ACTION_{action.upper().replace(' ','_')}"
+    if vocab_get(key, "") == "":
+        vocab_append_new(key, action.lower(), prefix="py:")
+
+# ════════════════════════════════════════════════════════════
+#   TOOL MANIFEST SYSTEM
+#   Scans dgapi/resources/*.manifest at startup and shutdown.
+#   Manifest format (plain text key=value, same as hardware.cache):
+#     NAME=tool_name  BINARY=file  DESCRIPTION=...
+#     INPUT_FORMAT=...  OUTPUT_FORMAT=...  ARGS=--time {INPUT}
+#     TAGS=space separated  VERSION=1.0  AUTHOR=name
+# ════════════════════════════════════════════════════════════
+
+def _tool_state_path():
+    return TOOL_STATE if tool_state_is_shared() else TOOL_STATE_SH
+
+def load_tool_state():
+    p = _tool_state_path()
+    if not p.exists(): return {}
+    out = {}
+    for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line: continue
+        k, _, v = line.partition("=")
+        out[k.strip()] = v.strip()
+    return out
+
+def save_tool_state(state):
+    if not ELEVATED: return
+    lines = ["# tool_state.txt — which tools the user has enabled\n"]
+    for name, val in sorted(state.items()):
+        lines.append(f"{name}={val}\n")
+    _tool_state_path().write_text("".join(lines), encoding="utf-8")
+
+def set_tool_enabled(name, enabled):
+    if not ELEVATED: return
+    state = load_tool_state()
+    state[name] = "enabled" if enabled else "disabled"
+    save_tool_state(state)
+    journal_append(f"TOOL {'ENABLED' if enabled else 'DISABLED'}: {name}")
+
+def is_tool_enabled(name):
+    return load_tool_state().get(name, "disabled") == "enabled"
+
+def scan_manifests():
+    """
+    Scan dgapi/resources/*.manifest. Writes almanac entries, registers
+    tools in vocab, and builds shared.txt pipeline compatibility map.
+    Called at startup and shutdown.
+    """
+    if not RESOURCES_DIR.exists():
+        RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
+    manifests = []
+    for mf in sorted(RESOURCES_DIR.glob("*.manifest")):
+        m = _parse_kv(mf)
+        if not m: continue
+        m["_manifest_path"] = str(mf)
+        m["_binary_path"]   = str(RESOURCES_DIR / m.get("BINARY", ""))
+        manifests.append(m)
+        if ELEVATED:
+            write_almanac_entry("TOOLS", m.get("NAME", mf.stem),
+                                m.get("DESCRIPTION","No description."),
+                                "resources manifest")
+            vocab_append_new(
+                f"TOOL_{m.get('NAME','').upper().replace(' ','_')}",
+                m.get("DESCRIPTION","")[:60], prefix="py:")
+    _write_shared_txt(manifests)
+    return manifests
+
+def _write_shared_txt(manifests):
+    """Auto-detect compatible tool pipelines and write to shared.txt."""
+    if not ELEVATED: return
+    header = (
+        "# shared.txt — tool pipeline differential map\n"
+        "# Format: OUTPUT_OF_TOOL->INPUT_TO_TOOL : FIELD_MAPPING\n"
+        "# Written by resource scanner. AI may extend this file.\n"
+    )
+    lines = [header]
+    for i, ma in enumerate(manifests):
+        for mb in manifests[i+1:]:
+            a_out = ma.get("OUTPUT_FORMAT","").lower()
+            b_in  = mb.get("INPUT_FORMAT", "").lower()
+            if any(w in b_in for w in a_out.split() if len(w) > 3):
+                lines.append(
+                    f"{ma.get('NAME','')}>{mb.get('NAME','')} : "
+                    f"OUTPUT={ma.get('OUTPUT_FORMAT','?')} "
+                    f"INPUT={mb.get('INPUT_FORMAT','?')}\n")
+    SHARED_TXT.write_text("".join(lines), encoding="utf-8")
+
+def classify_tool_intent(query, gguf_instance, manifests):
+    """
+    Returns (action, tool_name).
+    Routes through GGUF if available; keyword fallback otherwise.
+    """
+    known_names = [m.get("NAME","").lower() for m in manifests]
+    if not known_names: return None, None
+
+    if gguf_instance and gguf_instance.available:
+        prompt = (
+            f"Available tools: {', '.join(known_names)}\n"
+            f"User query: \"{query}\"\n"
+            f"Does this query ask to enable, disable, or use one of the tools?\n"
+            f"Reply with exactly one of:\nENABLE <tool_name>\nDISABLE <tool_name>\nNONE\nAnswer:"
+        )
+        raw = gguf_instance._query(prompt, max_tokens=20).strip().upper()
+        if raw.startswith("ENABLE "):
+            match = next((n for n in known_names if n in raw[7:].lower()), None)
+            if match: return "enable", match
+        elif raw.startswith("DISABLE "):
+            match = next((n for n in known_names if n in raw[8:].lower()), None)
+            if match: return "disable", match
+        return None, None
+
+    q = query.lower()
+    for name in known_names:
+        for pat in ["stop using ","disable ","deactivate ","turn off "]:
+            if pat + name in q: return "disable", name
+        for pat in ["use ","look at ","enable ","activate ","run ","launch "]:
+            if pat + name in q: return "enable", name
+    return None, None
+
+def execute_tool(manifest, query_input):
+    """Run a dgapi/resources binary. Blocked in restricted mode."""
+    if not ELEVATED: return "[Tool execution blocked: restricted mode]"
+    name   = manifest.get("NAME","unknown")
+    binary = manifest.get("_binary_path","")
+    args   = manifest.get("ARGS","{INPUT}").replace("{INPUT}", str(query_input))
+    if not binary or not Path(binary).exists():
+        return f"[Tool '{name}': binary not found at {binary}]"
+    try:
+        result = _sp.run([binary] + args.split(),
+                         capture_output=True, text=True, timeout=30,
+                         cwd=str(RESOURCES_DIR))
+        out = result.stdout.strip() or result.stderr.strip()
+        journal_append(f"TOOL EXEC: {name} | exit:{result.returncode} | out:{len(out)}c")
+        if ELEVATED and SHARED_TXT.exists():
+            with open(SHARED_TXT,"a",encoding="utf-8") as f:
+                f.write(f"# Last run: {name} -> {out[:80]}\n")
+        return out
+    except Exception as e:
+        journal_append(f"TOOL EXEC ERROR: {name} | {e}")
+        return f"[Tool '{name}' error: {e}]"
+
+# ════════════════════════════════════════════════════════════
+#   IMAGE GGUF — vision model for intake image processing
+#   Detected by "(image)" in the filename.
+#   Flows through the same religion.txt → encyclopedia.txt pipeline.
+#   The GGUF file itself is never modified.
+# ════════════════════════════════════════════════════════════
+
+class ImageGGUF:
+    def __init__(self, gguf_path):
+        self.path = gguf_path; self._model = None; self._load()
+
+    def _load(self):
+        if not LLAMA_CPP:
+            chat("WARN: llama-cpp-python not installed — image GGUF disabled."); return
+        try:
+            status("STATE: BOOTING | LOADING IMAGE GGUF")
+            clip_candidates = sorted(MATRIX_ROOT.glob("*.mmproj"))
+            clip_path = str(clip_candidates[0]) if clip_candidates else None
+            kwargs = {"model_path":str(self.path),"n_ctx":2048,
+                      "n_threads":4,"n_gpu_layers":0,"verbose":False}
+            if clip_path: kwargs["clip_model_path"] = clip_path
+            self._model = _Llama(**kwargs)
+            chat(f"Image encyclopedia loaded: {self.path.name}")
+        except Exception as e:
+            chat(f"Image GGUF load failed: {e}"); self._model = None
+
+    @property
+    def available(self): return self._model is not None
+
+    def describe_image(self, image_path):
+        if not self.available or not _GGUF_WRITE_ALLOWED: return ""
+        try:
+            result = self._model.create_chat_completion(
+                messages=[{"role":"user","content":[
+                    {"type":"image_url","image_url":{"url":f"file://{image_path}"}},
+                    {"type":"text","text":"Describe this image in 2-3 sentences."}
+                ]}], max_tokens=200)
+            return result["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            journal_append(f"IMAGE GGUF describe error: {e}"); return ""
+
+    def process_intake_image(self, fp):
+        if not self.available or not _GGUF_WRITE_ALLOWED: return
+        description = self.describe_image(str(fp))
+        if not description: return
+        uid = "img_" + re.sub(r'[^a-z0-9]','_',fp.stem.lower()[:30])
+        religion_propose_theory(uid,"TOPIC",topic=fp.name,
+                                proposed_text=description[:200],
+                                source=self.path.name)
+        religion_promote_ready()
+        chat(f"Image processed: {fp.name}")
+        journal_append(f"IMAGE GGUF: {fp.name} | desc len:{len(description)}")
 
 def journal_append(entry):
     t = ts_now()
@@ -901,14 +1187,8 @@ class SystemProfiler:
                 "cores_logical":psutil.cpu_count(logical=True) if PSUTIL else "?",
                 "frequency_mhz":(psutil.cpu_freq().max if PSUTIL and psutil.cpu_freq() else "Unknown")}
         if CPUINFO:
-            try:
-                # Attempt deep hardware probe
-                ci = cpuinfo.get_cpu_info()
-                info["brand"] = ci.get("brand_raw","Unknown")
-            except Exception as e:
-                # If the sandbox blocks the CPUID probe, fallback gracefully
-                info["brand"] = info["processor"]
-                
+            ci = cpuinfo.get_cpu_info()
+            info["brand"] = ci.get("brand_raw","Unknown")
         return info
 
     def scan_memory(self):
@@ -1271,6 +1551,8 @@ class ReasoningEngine:
             idx=text.lower().find(term)
             while idx>=0:
                 results.append(text[max(0,idx-80):min(len(text),idx+300)].strip())
+                if PATCH_ACTIVE:
+                    update_entry_last_seen(fp, term)
                 idx=text.lower().find(term,idx+1)
                 if len(results)>=3: break
         return results
@@ -1387,7 +1669,12 @@ class GoddessAPISystem:
         self.query_count=0; self.engine=None
         self.optimizer=Optimizer(); self.intake_watcher=None
         self.log_watcher=None; self.greeting_text=""; self._running=True
-        self.gguf=None   # GGUFEncyclopedia — None if no .gguf found
+        self.gguf=None            # GGUFEncyclopedia — None if no text .gguf found
+        self.image_gguf=None      # ImageGGUF — None if no (image) .gguf found
+        self.manifests=[]         # tool manifests from dgapi/resources
+        self.tool_state={}        # name -> enabled|disabled
+        self.response_lengths=[]  # recent response lengths for de-escalation tracking
+        self.exp_flags={}         # loaded at startup from experimental.txt
         signal.signal(signal.SIGINT,self._sig); signal.signal(signal.SIGTERM,self._sig)
 
     def _sig(self,*_): self.shutdown()
@@ -1411,12 +1698,27 @@ class GoddessAPISystem:
         persona_set_key("LAST_STARTUP", datetime.datetime.now().isoformat())
 
         # ── INITIALIZE GOVERNANCE ────────────────────────────────────
-        self.datas_dir = DGAPI / "datas"
-        self.convodata_dir = Path("convodata")
+        self.datas_dir    = DATAS_DIR
+        self.convodata_dir = STORAGE if isinstance(STORAGE, Path) else Path(str(STORAGE))
         if PATCH_ACTIVE:
             init_experimental_files(self.datas_dir)
             self.exp_flags = load_experimental_flags(self.datas_dir)
             journal_append("Experimental governance module online.")
+            # Run startup suggestion check
+            suggestions = suggest_experimental_adjustments_from_logs(
+                self.datas_dir, self.convodata_dir)
+            for feat, msg in suggestions:
+                chat(f"SYS_SUGGEST [{feat}]: {msg}")
+            # Memory degradation startup pass
+            if is_feature_enabled(self.exp_flags, "MEMORY_DEGRADATION") and ELEVATED:
+                days = feature_value(self.exp_flags, "MEMORY_DEGRADATION_DAYS", default=30)
+                jpath = experimental_journal_path(self.datas_dir)
+                total = 0
+                for kf in [DICTIONARY, THESAURUS, ALMANAC]:
+                    total += mark_stale_entries(kf, days, jpath)
+                if total:
+                    chat(f"Memory degradation: {total} entries marked STALE "
+                         f"(>{days} days unreferenced).")
         else:
             self.exp_flags = {}
         # ─────────────────────────────────────────────────────────────
@@ -1459,21 +1761,51 @@ class GoddessAPISystem:
 
         self.engine=ReasoningEngine(self.profile)
 
-        # ── GGUF ENCYCLOPEDIA — startup event ────────────────────────
-        # Write gate open only during this block. Optimization loop and
-        # idle never open the gate — writes are strictly event-gated.
-        gguf_path = find_gguf()
-        if gguf_path:
-            global _GGUF_WRITE_ALLOWED
-            _GGUF_WRITE_ALLOWED = True
-            self.gguf = GGUFEncyclopedia(gguf_path)
-            self.gguf.startup_enrichment()
-            _GGUF_WRITE_ALLOWED = False
-            self.optimizer.gguf = self.gguf
+        # ── RESOURCE MANIFEST SCAN — startup event ────────────────────
+        status("STATE: BOOTING | SCANNING RESOURCES")
+        emit_action("SCANNING")
+        self.manifests  = scan_manifests()
+        self.tool_state = load_tool_state()
+        if self.manifests:
+            chat(f"Resources: {len(self.manifests)} tool(s) found.")
+            vocab_set("TOOL_COUNT", str(len(self.manifests)), prefix="py:")
+        # ─────────────────────────────────────────────────────────────
+
+        # ── GGUF DUAL-RAIL LOADING ───────────────────────────────────
+        global _GGUF_WRITE_ALLOWED
+        
+        # 1. TEXT GGUF
+        if not PATCH_ACTIVE or is_feature_enabled(self.exp_flags, "TEXT_GGUF_LOAD"):
+            gguf_path = find_gguf()
+            if gguf_path:
+                _GGUF_WRITE_ALLOWED = True
+                self.gguf = GGUFEncyclopedia(gguf_path)
+                self.gguf.startup_enrichment()
+                _GGUF_WRITE_ALLOWED = False
+                self.optimizer.gguf = self.gguf
+                chat(f"  Text GGUF         -> {gguf_path.name}")
+            else:
+                chat("  Text GGUF         -> NOT FOUND")
+        else:
+            chat("  Text GGUF         -> DISABLED")
+
+        # 2. IMAGE GGUF
+        if not PATCH_ACTIVE or is_feature_enabled(self.exp_flags, "IMAGE_GGUF_INTAKE"):
+            img_gguf_path = find_image_gguf()
+            if img_gguf_path:
+                self.image_gguf = ImageGGUF(img_gguf_path)
+                if self.image_gguf.available:
+                    vocab_set("IMAGE_GGUF_PRESENT", "true", prefix="py:")
+                    chat(f"  Image GGUF        -> {img_gguf_path.name}")
+            else:
+                chat("  Image GGUF        -> NOT FOUND")
+        else:
+            chat("  Image GGUF        -> DISABLED")
         # ─────────────────────────────────────────────────────────────
 
         self.greeting_text=build_greeting(self.profile,self.session_start,off_s,intake_count)
         for line in self.greeting_text.strip().splitlines(): chat(line)
+        emit_action("IDLE")
         status("STATE: IDLE | AWAITING INPUT")
 
         self.optimizer.start()
@@ -1494,22 +1826,75 @@ class GoddessAPISystem:
             chat("Type any query to search the knowledge base.")
             chat("Drop files into intake/books/ — they load without restart."); return
 
+        emit_action("PROCESSING")
         processing(); status("STATE: PROCESSING | REASONING")
         self.context.append({"role":"user","query":query,"ts":ts_now()})
         self.query_count+=1
-        response=self.engine.respond(query)
+
+        # ── TOOL INTENT CLASSIFICATION ────────────────────────────────
+        # Route through GGUF only if TOOL_INTENT_GGUF is enabled.
+        gguf_for_intent = self.gguf if (
+            PATCH_ACTIVE and is_feature_enabled(self.exp_flags, "TOOL_INTENT_GGUF")
+        ) else None
+        tool_action, tool_name = classify_tool_intent(
+            query, gguf_for_intent, self.manifests)
+        tool_response = ""
+        if tool_action == "enable":
+            set_tool_enabled(tool_name, True)
+            self.tool_state = load_tool_state()
+            chat(f"Tool enabled: {tool_name}")
+            emit_action("TOOL_ENABLED")
+        elif tool_action == "disable":
+            set_tool_enabled(tool_name, False)
+            self.tool_state = load_tool_state()
+            chat(f"Tool disabled: {tool_name}")
+            emit_action("TOOL_DISABLED")
+        else:
+            # Auto-fire: only if TOOL_AUTO_FIRE is enabled (or patch not active)
+            auto_fire = (not PATCH_ACTIVE) or is_feature_enabled(
+                self.exp_flags, "TOOL_AUTO_FIRE")
+            if auto_fire:
+                for m in self.manifests:
+                    name = m.get("NAME","").lower()
+                    tags = m.get("TAGS","").lower().split()
+                    if is_tool_enabled(name):
+                        if any(t in query.lower() for t in tags if len(t) > 3):
+                            emit_action("USING_TOOL")
+                            tool_response = execute_tool(m, query)
+                            break
+        # ─────────────────────────────────────────────────────────────
+
+        emit_action("THINKING")
+        response = self.engine.respond(query)
+
+        # ── DE-ESCALATION CHECK ───────────────────────────────────────
+        if PATCH_ACTIVE and check_de_escalation(
+                self.exp_flags, self.response_lengths,
+                sensitivity=feature_value(self.exp_flags,
+                                          "DE_ESCALATION_SENSITIVITY", default=3)):
+            # Trim to summary: take first paragraph only
+            trimmed = response.split("\n\n")[0] if "\n\n" in response else response
+            trimmed = de_escalation_note() + "\n" + trimmed
+            journal_append(f"DE_ESCALATION: trimmed {len(response)} → {len(trimmed)} chars")
+            response = trimmed
+        # Track response length for future de-escalation checks
+        self.response_lengths.append(len(response))
+        if len(self.response_lengths) > 10:
+            self.response_lengths = self.response_lengths[-10:]
+        # ─────────────────────────────────────────────────────────────
         self.context.append({"role":"assistant","response":response[:300],"ts":ts_now()})
         journal_append(f"QUERY: {query[:80]} | RESPONSE LEN: {len(response)} chars")
+        emit_action("CHAT")
         for line in response.splitlines():
             if line.strip(): chat(line)
+        if tool_response:
+            chat(f"Tool output: {tool_response[:300]}")
 
         # ── GGUF ENCYCLOPEDIA — user input event ─────────────────────
-        # Write gate open only during this block.
         if self.gguf and self.gguf.available:
             global _GGUF_WRITE_ALLOWED
             _GGUF_WRITE_ALLOWED = True
             enc = self.gguf.enrich_query(query)
-            # Also enrich notable words from the query itself
             for w in set(re.findall(r'\b[a-zA-Z]{6,}\b', query)):
                 self.gguf.enrich_word(w.lower())
             _GGUF_WRITE_ALLOWED = False
@@ -1519,22 +1904,32 @@ class GoddessAPISystem:
                     if line.strip(): chat(f"  {line}")
         # ─────────────────────────────────────────────────────────────
 
+        emit_action("IDLE")
         status("STATE: IDLE | AWAITING INPUT")
         self.optimizer.wake()
 
     def shutdown(self):
+        emit_action("SHUTDOWN")
         status("STATE: SHUTDOWN | SAVING")
         self._running=False
         if self.optimizer:      self.optimizer.stop()
         if self.intake_watcher: self.intake_watcher.stop()
         if self.log_watcher:    self.log_watcher.stop()
 
+        # ── CONTEXT DECAY — shutdown event ────────────────────────────
+        if PATCH_ACTIVE and is_feature_enabled(self.exp_flags, "CONTEXT_DECAY"):
+            days = feature_value(self.exp_flags, "CONTEXT_DECAY_DAYS", default=7)
+            self.context, removed = decay_context(self.context, days)
+            if removed:
+                journal_append(f"CONTEXT_DECAY: removed {removed} entries older than {days}d")
+        # ─────────────────────────────────────────────────────────────
+
         # ── GGUF ENCYCLOPEDIA — shutdown event ───────────────────────
-        # Final enrichment pass before state is saved.
         if self.gguf and self.gguf.available:
             global _GGUF_WRITE_ALLOWED
             _GGUF_WRITE_ALLOWED = True
             self.gguf.shutdown_enrichment()
+            if self.manifests: scan_manifests()  # final resource scan
             _GGUF_WRITE_ALLOWED = False
         # ─────────────────────────────────────────────────────────────
 
