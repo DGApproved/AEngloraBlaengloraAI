@@ -58,9 +58,9 @@ public class GoddessMatrix extends JFrame {
 
      // Calibration Constants
         //ints
-    private static final int KEY_U = 42;
-    private static final int KEY_H = 36;
-    private static final int KEY_GAP = 5;
+    private static final int KEY_U = 29;
+    private static final int KEY_H = 23;
+    private static final int KEY_GAP = 4;
         //colors
     private static final Color BG_DARK = new Color(10, 10, 12);
     private static final Color GODDESS_PURPLE = new Color(157, 80, 187);
@@ -175,7 +175,7 @@ public class GoddessMatrix extends JFrame {
     // ── AI VISUAL RENDERER STATE ─────────────────────────────
     // No separate timer — renderer runs inside the existing
     // display-rate refreshTimer so it always matches the monitor.
-    private int              displayRefreshRate  = 60;   // set by initRefreshTimer
+    private int              displayRefreshRate  = 59;   // set by initRefreshTimer
     private volatile boolean isAIProcessing      = false;
     private volatile long    aiSessionStartMs    = 0;
     private volatile int     aiQueryCount        = 0;
@@ -238,18 +238,18 @@ public class GoddessMatrix extends JFrame {
             //Jpanels
         JPanel headerPanel = new JPanel(new BorderLayout());
         headerPanel.setBackground(BG_DARK);
-        headerPanel.setBorder(BorderFactory.createEmptyBorder(10, 27, 10, 27));
+        headerPanel.setBorder(BorderFactory.createEmptyBorder(5, 13, 5, 13));
 
         JPanel titleGroup = new JPanel(new GridLayout(2, 1));
         titleGroup.setBackground(BG_DARK);
 
         JLabel title = new JLabel("GODDESS INPUT MATRIX", SwingConstants.CENTER);
         title.setForeground(Color.WHITE);
-        title.setFont(new Font("Inter", Font.BOLD, 20));
+        title.setFont(new Font("Inter", Font.BOLD, 15));
 
         JLabel subtitle = new JLabel("SPLIT-BRAIN SANDBOX • CHROOT MANAGER V14.4", SwingConstants.CENTER);
         subtitle.setForeground(TEXT_COLOR);
-        subtitle.setFont(new Font("Monospaced", Font.PLAIN, 10));
+        subtitle.setFont(new Font("Monospaced", Font.PLAIN, 9));
         titleGroup.add(title);
         titleGroup.add(subtitle);
             //chathistory
@@ -257,24 +257,24 @@ public class GoddessMatrix extends JFrame {
         chatHistory.setEditable(false);
         chatHistory.setBackground(HISTORY_BG);
         chatHistory.setForeground(TEXT_COLOR);
-        chatHistory.setFont(new Font("JetBrains Mono", Font.PLAIN, 14));
+        chatHistory.setFont(new Font("JetBrains Mono", Font.PLAIN, 13));
         chatHistory.setLineWrap(true);
         chatHistory.setWrapStyleWord(true);
-        chatHistory.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        chatHistory.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
 
         JScrollPane historyPane = new JScrollPane(chatHistory);
         historyPane.setBorder(new LineBorder(new Color(157, 80, 187, 30), 1));
-        historyPane.setPreferredSize(new Dimension(800, 450));
+        historyPane.setPreferredSize(new Dimension(800, 375));
             //TypingBuffer
         typingBuffer = new JTextField();
         typingBuffer.setBackground(INPUT_BG);
         typingBuffer.setForeground(GODDESS_GOLD);
         typingBuffer.setCaretColor(GODDESS_PURPLE);
-        typingBuffer.setFont(new Font("JetBrains Mono", Font.PLAIN, 16));
+        typingBuffer.setFont(new Font("JetBrains Mono", Font.PLAIN, 15));
         typingBuffer.setBorder(BorderFactory.createCompoundBorder(new LineBorder(new Color(157, 80, 187, 50), 1),BorderFactory.createEmptyBorder(10, 15, 10, 15)));
         typingBuffer.setEditable(false);
         typingBuffer.getCaret().setVisible(true);
-        typingBuffer.getCaret().setBlinkRate(500);
+        typingBuffer.getCaret().setBlinkRate(450);
             //headerPanel
         headerPanel.add(titleGroup, BorderLayout.NORTH);
         headerPanel.add(historyPane, BorderLayout.CENTER);
@@ -295,10 +295,10 @@ public class GoddessMatrix extends JFrame {
                 if (isHtmlStreamActive && manifestVisible) 
                 {
                     g.setColor(GODDESS_GOLD);
-                    g.setFont(new Font("Monospaced", Font.BOLD, 12));
+                    g.setFont(new Font("Monospaced", Font.BOLD, 11));
                     drawCentered(g, "EXTERNAL_HTML_STREAM_ACTIVE");
-                    g.setFont(new Font("Monospaced", Font.PLAIN, 10));
-                    drawCentered(g, "CONTROLLER_MODE: READY", 20);
+                    g.setFont(new Font("Monospaced", Font.PLAIN, 9));
+                    drawCentered(g, "CONTROLLER_MODE: READY", 15);
                 } 
                 else if (activeBuffer != null && manifestVisible) 
                 {
@@ -310,20 +310,20 @@ public class GoddessMatrix extends JFrame {
                     
                     if (isVideoStreamActive) {
                         g2.setColor(new Color(250, 205, 104, 150));
-                        g2.setFont(new Font("Monospaced", Font.BOLD, 10));
+                        g2.setFont(new Font("Monospaced", Font.BOLD, 9));
                         g2.drawString("● LIVE", 5, 12);
                     }
                 } 
                 else if (!manifestVisible) 
                 {
                     g.setColor(new Color(239, 68, 68, 40));
-                    g.setFont(new Font("Monospaced", Font.BOLD, 10));
+                    g.setFont(new Font("Monospaced", Font.BOLD, 9));
                     drawCentered(g, "MANIFEST_HIDDEN");
                 } 
                 else 
                 {
                     g.setColor(new Color(157, 80, 187, 40));
-                    g.setFont(new Font("Monospaced", Font.BOLD, 10));
+                    g.setFont(new Font("Monospaced", Font.BOLD, 9));
                     drawCentered(g, "IMAGE_MANIFEST_PENDING");
                 }
             }
@@ -343,7 +343,7 @@ public class GoddessMatrix extends JFrame {
         };
 
         imageManifest.setBackground(MANIFEST_BG);
-        imageManifest.setBounds(1080, 10, 320, 240);
+        imageManifest.setBounds(785, 10, 240, 160);
         imageManifest.setBorder(new LineBorder(new Color(157, 80, 187, 40), 1));
         imageManifest.addMouseListener(new MouseAdapter() 
         {
@@ -417,18 +417,18 @@ public class GoddessMatrix extends JFrame {
             //statusLabels
         statusLabel = new JLabel("READY_FOR_INTERRUPT... | ");
         statusLabel.setForeground(GODDESS_PURPLE);
-        statusLabel.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        statusLabel.setFont(new Font("Monospaced", Font.PLAIN, 11));
             //modifierLabels
         modifierLabel = new JLabel("BRIDGE: OFFLINE | NAVIGATION: READY");
         modifierLabel.setForeground(TEXT_COLOR);
-        modifierLabel.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        modifierLabel.setFont(new Font("Monospaced", Font.PLAIN, 11));
             //leftFooters
         leftFooter.add(statusLabel);
         leftFooter.add(modifierLabel);
             //aiStatusLabels
         aiStatusLabel = new JLabel(API_OFFLINE);
         aiStatusLabel.setForeground(GODDESS_GOLD);
-        aiStatusLabel.setFont(new Font("Monospaced", Font.BOLD, 12));
+        aiStatusLabel.setFont(new Font("Monospaced", Font.BOLD, 11));
             //footers
         footer.add(leftFooter, BorderLayout.WEST);
         footer.add(aiStatusLabel, BorderLayout.EAST);
@@ -437,7 +437,7 @@ public class GoddessMatrix extends JFrame {
         add(matrixPanel, BorderLayout.CENTER);
         add(footer, BorderLayout.SOUTH);
             //Size, Position
-        setSize(1450, 960);
+        setSize(1080, 702);
         setLocationRelativeTo(null);
             //Setups
         setupHardwareBridge();
@@ -1287,7 +1287,7 @@ public class GoddessMatrix extends JFrame {
                 .getRefreshRate();
         if (rate < 30) 
         {
-            rate = 60;
+            rate = 59;
         }
         displayRefreshRate = rate;
 
@@ -2096,9 +2096,9 @@ private void loadSystemProfile()
 
     private BufferedImage renderAIFrame() 
     {
-        // Determine manifest panel size — fall back to 320x240
-        int W = (imageManifest.getWidth()  > 0) ? imageManifest.getWidth()  : 320;
-        int H = (imageManifest.getHeight() > 0) ? imageManifest.getHeight() : 240;
+        // Determine manifest panel size — fall back to 240x160
+        int W = (imageManifest.getWidth()  > 0) ? imageManifest.getWidth()  : 240;
+        int H = (imageManifest.getHeight() > 0) ? imageManifest.getHeight() : 160;
 
         BufferedImage img = new BufferedImage(W, H, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = img.createGraphics();
@@ -2201,7 +2201,7 @@ private void loadSystemProfile()
 
         // ── WAVEFORM / PULSE ANIMATION ────────────────────────
         int waveY    = yTop;
-        int waveH    = Math.min(60, H - waveY - 40);
+        int waveH    = Math.min(59, H - waveY - 40);
         int waveMidY = waveY + waveH / 2;
 
         if (isAIProcessing) {
@@ -2463,8 +2463,8 @@ private void loadSystemProfile()
     {
         loadImageXTX();
 
-        int W = (imageManifest.getWidth()  > 0) ? imageManifest.getWidth()  : 320;
-        int H = (imageManifest.getHeight() > 0) ? imageManifest.getHeight() : 240;
+        int W = (imageManifest.getWidth()  > 0) ? imageManifest.getWidth()  : 240;
+        int H = (imageManifest.getHeight() > 0) ? imageManifest.getHeight() : 160;
 
         BufferedImage img = new BufferedImage(W, H, BufferedImage.TYPE_INT_RGB);
         Graphics2D    g   = img.createGraphics();
@@ -2676,7 +2676,7 @@ private void loadSystemProfile()
         //KeyboardSetup
     private void setupKeyboard(JPanel panel) 
     {
-        int currentY = 10;
+        int currentY = 9;
         int currentX = 27;
 
         for (int i = 1; i <= 17; i++) 
@@ -3658,17 +3658,17 @@ private void loadSystemProfile()
         SwingUtilities.invokeLater(() -> {
             GoddessMatrix matrix = new GoddessMatrix();
             matrix.setVisible(true);
-            BufferedImage test = new BufferedImage(800, 600, BufferedImage.TYPE_INT_RGB);
+            BufferedImage test = new BufferedImage(480, 320, BufferedImage.TYPE_INT_RGB);
             Graphics2D g2 = test.createGraphics();
-            g2.setPaint(new GradientPaint(0, 0, new Color(10, 10, 12), 800, 600, new Color(40, 20, 60)));
-            g2.fillRect(0, 0, 800, 600);
+            g2.setPaint(new GradientPaint(0, 0, new Color(10, 10, 12), 480, 320, new Color(40, 20, 60)));
+            g2.fillRect(0, 0, 480, 320);
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             g2.setColor(new Color(157, 80, 187, 150));
             g2.setStroke(new BasicStroke(4));
-            g2.drawOval(250, 150, 300, 300);
+            g2.drawOval(160, 70, 150, 150);
             g2.setColor(new Color(250, 205, 104));
-            g2.setFont(new Font("JetBrains Mono", Font.BOLD, 28));
-            g2.drawString("MATRIX_V14.4_READY", 240, 315);
+            g2.setFont(new Font("JetBrains Mono", Font.BOLD, 18));
+            g2.drawString("MATRIX_V14.4_READY", 160, 240);
             g2.dispose();
             matrix.manifestImage(test);
         });
