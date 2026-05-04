@@ -56,6 +56,24 @@ DEFAULT_EXPERIMENTAL_FLAGS: Dict[str, str] = {
     "LOG_SELF_OPTIMIZATION_READ": "AI_SELF:on",
     "LOG_APPEND_MEMORY":          "AI_SELF:on",
 
+    # ── AUTONOMOUS / LIVE SYSTEM PASSES ───────────────────────────────────────
+    # LIVE_HARDWARE_MONITOR: writes lightweight live telemetry to
+    # dgapi/system/hardware_live.txt. It does NOT overwrite hardware.cache.
+    "LIVE_HARDWARE_MONITOR":      "USER:on",
+
+    # AUTONOMOUS_COGNITION: lets the optimizer occasionally ask the text GGUF
+    # which safe maintenance action should run: compress, refactor, aesthetics,
+    # ponder, or idle. All writes still obey existing write gates.
+    "AUTONOMOUS_COGNITION":       "USER:off",
+
+    # AVATAR_CHOREOGRAPHY_EVOLUTION: lets the optimizer generate a compact
+    # avatar idle-action sequence into dgapi/virtual/avatar_choreography.txt.
+    "AVATAR_CHOREOGRAPHY_EVOLUTION": "AI_SELF:on",
+
+    # AVATAR_AESTHETIC_REFINEMENT: lets the image GGUF critique
+    # dgapi/virtual/avatar_active.png and queue feedback as a theory.
+    "AVATAR_AESTHETIC_REFINEMENT": "USER:off",
+
     # ── AVATAR / PROTOCOL TAGS ────────────────────────────────────────────────
     # EMIT_ACTION_TAGS: whether [ACTION] protocol tags are sent to Java.
     #   Disable if Mode B is not in use and the tag output is unwanted.
@@ -145,6 +163,44 @@ DEFAULT_EXPERIMENTAL_FLAGS: Dict[str, str] = {
     # CONTEXT_DECAY_DAYS: entries older than this are removed from context
     #   at shutdown when CONTEXT_DECAY is on. Default 7 days.
     "CONTEXT_DECAY_DAYS":         "AI_SELF:on:7",
+
+    # ── ANALOG DEBOUNCE ────────────────────────────────────────────────
+    # ANALOG_DEBOUNCE: whether the keyboard noise filter is active.
+    #   Catches and discards duplicate keypress signals from physically
+    #   degraded keyboard traces — the same key firing twice within the
+    #   threshold window. Disable if you type fast and are seeing missed
+    #   keystrokes, or if your hardware is reliable and you want no filter.
+    #   Authority: USER — this is hardware behaviour, not AI behaviour.
+    "ANALOG_DEBOUNCE":            "USER:on",
+
+    # ANALOG_DEBOUNCE_MS: the debounce window in milliseconds.
+    #   Format: USER:on:N. Default 40ms.
+    #   Raise for keyboards with severe trace degradation (worn contacts,
+    #   membrane fatigue). Lower if fast intentional keypresses are dropped.
+    #   Tunable — different hardware, different hands, different values.
+    #   Only active when ANALOG_DEBOUNCE is on.
+    "ANALOG_DEBOUNCE_MS":         "USER:on:40",
+
+    # ── GGUF MODEL LOADING ─────────────────────────────────────────────
+    # TEXT_GGUF_LOAD: enable or disable text GGUF model loading entirely.
+    #   If off, the GGUF encyclopedia is skipped even if a model file is present.
+    "TEXT_GGUF_LOAD":             "USER:on",
+
+    # TEXT_GGUF_PATH: path to the text GGUF file, or 'auto' to find the first
+    #   non-(image) .gguf in MATRIX_ROOT. Set an absolute path to pin a model.
+    "TEXT_GGUF_PATH":             "USER:auto",
+
+    # IMAGE_GGUF_LOAD: enable or disable image GGUF model loading entirely.
+    #   Off by default — requires a (image)-named .gguf and an .mmproj file.
+    "IMAGE_GGUF_LOAD":            "USER:off",
+
+    # IMAGE_GGUF_PATH: path to the image GGUF file, or 'auto' to find the first
+    #   (image)-named .gguf in MATRIX_ROOT.
+    "IMAGE_GGUF_PATH":            "USER:auto",
+
+    # IMAGE_GGUF_MMPROJ_PATH: path to the multimodal projection (.mmproj) file
+    #   required by the image GGUF. 'auto' searches MATRIX_ROOT for *.mmproj.
+    "IMAGE_GGUF_MMPROJ_PATH":     "USER:auto",
 }
 
 _COMMENT_HEADER = """# experimental.txt
@@ -197,6 +253,17 @@ _COMMENT_HEADER = """# experimental.txt
 #   MEMORY_DEGRADATION_COMPRESS- GGUF-compress stale entries before removal (requires GGUF)
 #   CONTEXT_DECAY              - trim old context entries from hiberfile at shutdown
 #   CONTEXT_DECAY_DAYS         - context entries older than N days are removed; default 7
+#
+# ANALOG DEBOUNCE:
+#   ANALOG_DEBOUNCE            - enable/disable the keyboard hardware noise filter
+#   ANALOG_DEBOUNCE_MS         - debounce window in ms; tunable per hardware; default 40
+#
+# GGUF MODEL LOADING:
+#   TEXT_GGUF_LOAD             - enable/disable text GGUF loading (encyclopedia pipeline)
+#   TEXT_GGUF_PATH             - path to text GGUF, or 'auto' to find first .gguf in MATRIX_ROOT
+#   IMAGE_GGUF_LOAD            - enable/disable image GGUF loading (vision intake)
+#   IMAGE_GGUF_PATH            - path to image GGUF, or 'auto' to find first (image).gguf
+#   IMAGE_GGUF_MMPROJ_PATH     - path to multimodal projection file, or 'auto'
 """
 
 _JOURNAL_HEADER = """# experimental_journal.txt
@@ -219,6 +286,11 @@ def log_memory_index_path(datas_dir: Path) -> Path:
 # ── INITIALIZATION ───────────────────────────────────────────────────────────
 
 def init_experimental_files(datas_dir: Path) -> None:
+    """
+    Create experimental.txt if absent, or append any missing default flags
+    to an existing file. This ensures new flags added in future versions of
+    the patch are automatically surfaced without overwriting user edits.
+    """
     datas_dir.mkdir(parents=True, exist_ok=True)
 
     exp = experimental_path(datas_dir)
@@ -226,19 +298,20 @@ def init_experimental_files(datas_dir: Path) -> None:
         body = "\n".join(f"{k}={v}" for k, v in DEFAULT_EXPERIMENTAL_FLAGS.items())
         exp.write_text(_COMMENT_HEADER + "\n" + body + "\n", encoding="utf-8")
     else:
+        # Parse what's already in the file
         existing_text = exp.read_text(encoding="utf-8", errors="ignore")
-        existing = {}
+        existing: Dict[str, str] = {}
         for line in existing_text.splitlines():
             parsed = _parse_feature_line(line)
             if parsed:
                 k, v = parsed
                 existing[k] = v
 
+        # Append any keys present in defaults but absent from the file
         missing = {
             k: v for k, v in DEFAULT_EXPERIMENTAL_FLAGS.items()
             if k not in existing
         }
-
         if missing:
             with exp.open("a", encoding="utf-8") as f:
                 f.write("\n# Added automatically by updated experimental defaults\n")
@@ -261,7 +334,11 @@ def init_experimental_files(datas_dir: Path) -> None:
 # ── PARSING ──────────────────────────────────────────────────────────────────
 
 def _parse_feature_line(line: str) -> Optional[Tuple[str, str]]:
-    """Parse a feature line. Returns (name, raw_value) or None."""
+    """
+    Parse a feature line. Returns (name, raw_value) or None.
+    Accepts any non-empty state value — not just on/off — to support
+    path flags like TEXT_GGUF_PATH=USER:auto or TEXT_GGUF_PATH=USER:/path/to/file.gguf.
+    """
     line = line.strip()
     if not line or line.startswith("#") or "=" not in line:
         return None
@@ -271,13 +348,13 @@ def _parse_feature_line(line: str) -> Optional[Tuple[str, str]]:
     if ":" not in raw:
         return None
     mode, _, value = raw.partition(":")
-    mode = mode.strip().upper()
+    mode  = mode.strip().upper()
     value = value.strip()
     if mode not in {"USER", "AI_SUGGEST", "AI_SELF"}:
         return None
     if not value:
         return None
-    return feature, f"{mode}:{value}"  # return full raw including optional :VALUE
+    return feature, f"{mode}:{value}"  # full raw including optional :VALUE
 
 
 def load_experimental_flags(datas_dir: Path) -> Dict[str, str]:
@@ -313,21 +390,42 @@ def feature_value(flags: Dict[str, str], name: str, default: int = 0) -> int:
             pass
     return default
 
+
 def feature_value_str(flags: Dict[str, str], name: str, default: str = "") -> str:
+    """
+    Return the STATE component of a flag as a raw string.
+    Used for path flags where the state is not on/off but a path or 'auto'.
+    Example: TEXT_GGUF_PATH=USER:auto → returns 'auto'
+             TEXT_GGUF_PATH=USER:/path/to/file.gguf → returns '/path/to/file.gguf'
+    """
     raw = flags.get(name, DEFAULT_EXPERIMENTAL_FLAGS.get(name, f"USER:{default}"))
     parts = raw.split(":")
     return parts[1] if len(parts) > 1 else default
 
+
 def get_config_value(flags: Dict[str, str], name: str, default: str = "auto") -> str:
-    return feature_value_str(flags, name, default) 
+    """Convenience wrapper around feature_value_str for config/path flags."""
+    return feature_value_str(flags, name, default)
+
 
 def resolve_config_path(
     flags: Dict[str, str],
     name: str,
     *,
     base_dir: Path,
-    auto_pattern: str | None = None,
-) -> Path | None:
+    auto_pattern: Optional[str] = None,
+) -> Optional[Path]:
+    """
+    Resolve a path-valued flag to a concrete Path, or None if unavailable.
+
+    Behaviour:
+      - 'auto'  → glob base_dir with auto_pattern, return first match or None
+      - 'off', 'none', 'disabled', '' → return None
+      - absolute path → return it if it exists, else None
+      - relative path → resolve relative to base_dir, return if it exists, else None
+
+    Used for TEXT_GGUF_PATH, IMAGE_GGUF_PATH, IMAGE_GGUF_MMPROJ_PATH etc.
+    """
     value = get_config_value(flags, name, "auto").strip()
 
     if value.lower() in {"", "none", "off", "disabled"}:
@@ -404,49 +502,47 @@ def set_feature_flag(
     state: str,
     actor: str,
     reason: str,
+    value: Optional[int] = None,
 ) -> bool:
+    """
+    Set a feature flag state. Returns True if applied, False if blocked.
+    Accepts any non-empty state string — not just on/off — to support
+    path flags like TEXT_GGUF_PATH. Optionally update the numeric VALUE component.
+    """
     actor = actor.upper().strip()
     state = state.strip()
-
     if not state:
         raise ValueError("state must not be empty")
 
-    flags = load_experimental_flags(datas_dir)
+    flags     = load_experimental_flags(datas_dir)
     old_value = flags.get(feature, DEFAULT_EXPERIMENTAL_FLAGS.get(feature, "USER:off"))
-    mode = feature_mode(flags, feature)
+    mode      = feature_mode(flags, feature)
 
-    allowed = (
-        actor == "USER"
-        or (actor == "AI_SELF" and mode == "AI_SELF")
-    )
+    allowed = (actor == "USER" or (actor == "AI_SELF" and mode == "AI_SELF"))
 
-    new_value = f"{mode}:{state}"
+    # Build new raw value, preserving existing numeric component unless overridden
+    existing_parts = old_value.split(":")
+    new_raw = f"{mode}:{state}"
+    if value is not None:
+        new_raw += f":{value}"
+    elif len(existing_parts) > 2:
+        new_raw += f":{existing_parts[2]}"
 
     if not allowed:
         append_experimental_journal(
-            datas_dir,
-            actor=actor,
-            feature=feature,
-            old_value=old_value,
-            new_value=new_value,
-            reason=reason,
-            applied=False,
+            datas_dir, actor=actor, feature=feature,
+            old_value=old_value, new_value=new_raw,
+            reason=reason, applied=False,
         )
         return False
 
-    flags[feature] = new_value
+    flags[feature] = new_raw
     _rewrite_feature_file(datas_dir, flags)
-
     append_experimental_journal(
-        datas_dir,
-        actor=actor,
-        feature=feature,
-        old_value=old_value,
-        new_value=new_value,
-        reason=reason,
-        applied=True,
+        datas_dir, actor=actor, feature=feature,
+        old_value=old_value, new_value=new_raw,
+        reason=reason, applied=True,
     )
-
     return True
 
 
@@ -771,15 +867,22 @@ def suggest_experimental_adjustments_from_logs(
 #   Original patch design: experimental.txt governance layer, USER/AI_SUGGEST/
 #   AI_SELF authority modes, append-only journal, log memory access helpers,
 #   feature mutation and proposal helpers, suggestion engine.
+#   GGUF model loading flags: TEXT_GGUF_LOAD, TEXT_GGUF_PATH, IMAGE_GGUF_LOAD,
+#   IMAGE_GGUF_PATH, IMAGE_GGUF_MMPROJ_PATH.
+#   Path-value flag helpers: feature_value_str(), get_config_value(),
+#   resolve_config_path().
+#   Smart init: init_experimental_files() now appends missing keys to existing
+#   files rather than skipping them — forward-compatible with flag additions.
+#   Relaxed _parse_feature_line() and set_feature_flag() to accept non-on/off
+#   state values, enabling path and 'auto' config flags.
 #
 # Claude (Anthropic):
 #   Extended flag set: EMIT_ACTION_TAGS, IMAGE_GGUF_INTAKE, TOOL_AUTO_FIRE,
 #   TOOL_INTENT_GGUF, ENCYCLOPEDIA_PROMOTION, PERSONA_SELF_MODIFICATION,
 #   OUTPUT_VOCAB_EVOLUTION, DE_ESCALATION_RESPONSE, DE_ESCALATION_SENSITIVITY,
 #   MEMORY_DEGRADATION, MEMORY_DEGRADATION_DAYS, MEMORY_DEGRADATION_COMPRESS,
-#   CONTEXT_DECAY, CONTEXT_DECAY_DAYS.
+#   CONTEXT_DECAY, CONTEXT_DECAY_DAYS, ANALOG_DEBOUNCE, ANALOG_DEBOUNCE_MS.
 #   Added: feature_value() for numeric VALUE component, set_feature_value()
 #   helper, mark_stale_entries(), update_entry_last_seen(), decay_context(),
 #   check_de_escalation(), de_escalation_note().
-#   Updated: _parse_feature_line() to handle MODE:STATE:VALUE format.
 #   Updated: get_readable_logfiles() to use correct dgapi/ subdirectory paths.
