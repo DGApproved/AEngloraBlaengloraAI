@@ -9,8 +9,48 @@ Hardware cache  : hardware.cache  (plain text, shared with GoddessAPI.sh)
 """
 
 import os, re, sys, json, time, signal, threading, shutil, datetime, hashlib, platform
+import random
 from pathlib import Path
 import subprocess as _sp
+
+# 1. Detect the Environment
+# If it is NOT a raw terminal, we assume Java has hijacked the streams.
+is_java_matrix = not sys.stdout.isatty()
+
+# Alternatively, if Java passes a specific flag when the ImageViewer boots:
+is_image_viewer_connected = "--viewer-active" in sys.argv
+
+def handle_keystroke(char_received):
+    """
+    Processes a single keystroke received from the user.
+    """
+    
+    # ── 1. THE PERMANENT MEMORY (Always Pure) ─────────────────────────
+    # We append the raw, unmodified character to the history log.
+    # No paint tags, no UI metadata. Just the bone-white data.
+    with open("chathistory.txt", "a", encoding="utf-8") as log_file:
+        log_file.write(char_received)
+        
+        
+    # ── 2. THE VISUAL FEEDBACK (Context-Aware) ────────────────────────
+    if is_image_viewer_connected or is_java_matrix:
+        # We are inside the GoddessMatrix UI.
+        # The Java 'bone' already drew the character to the screen to prevent latency.
+        # We calculate the mood (e.g., Goddess Purple) and send the paint command.
+        
+        current_r = 157
+        current_g = 80
+        current_b = 187
+        
+        # Send the styling command back up the spinal cord to Java
+        print(f"[PAINT_LAST:{current_r},{current_g},{current_b}]", flush=True)
+        
+    else:
+        # We are running in a raw, standard Linux terminal window.
+        # There is no Java UI to paint, and the terminal needs the character
+        # echoed back to the screen so the user can see what they are typing.
+        
+        print(char_received, end="", flush=True)
 
 # ── OPTIONAL IMPORTS ─────────────────────────────────────────
 def _try(mod, attr=None):
@@ -35,7 +75,8 @@ try:
     from goddess_experimental_patch import (
         init_experimental_files, load_experimental_flags, is_feature_enabled,
         can_ai_toggle, set_feature_flag, set_feature_value, propose_feature_toggle,
-        feature_value, read_log_memory, append_log_memory,
+        feature_value, feature_value_str, get_config_value, resolve_config_path,
+        read_log_memory, append_log_memory,
         suggest_experimental_adjustments_from_logs,
         mark_stale_entries, update_entry_last_seen, decay_context,
         check_de_escalation, de_escalation_note,
@@ -44,45 +85,7 @@ try:
     PATCH_ACTIVE = True
 except ImportError:
     PATCH_ACTIVE = False
-# ── NON-BLOCKING HARDWARE SENSOR ─────────────────────────────────────────────
-def _hardware_monitor_loop():
-    cache_file = Path("datas/hardware.cache")
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    while True:
-        output = []
-        
-        # 1. CPU & RAM (If psutil is available)
-        if 'psutil' in globals() and psutil is not None:
-            cpu = psutil.cpu_percent(interval=None)
-            ram = psutil.virtual_memory().percent
-            output.append(f"RYZEN CPU: {cpu}% | SYS RAM: {ram}%")
-            
-        # 2. GPU VRAM (via nvidia-smi)
-        try:
-            nv = _sp.check_output(
-                ["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits"],
-                text=True, stderr=_sp.DEVNULL
-            ).strip().split(', ')
-            
-            if len(nv) == 4:
-                output.append(f"GTX 1060 VRAM: {nv[0]}MB / {nv[1]}MB | GPU UTIL: {nv[2]}% | TEMP: {nv[3]}C")
-        except Exception:
-            pass # Fail silently if nvidia-smi is busy or unavailable
-            
-        # 3. Write state atomically
-        if output:
-            try:
-                cache_file.write_text(" | ".join(output), encoding="utf-8")
-            except Exception:
-                pass
-                
-        time.sleep(5.0) # The timing cycle: update every 5 seconds
-
-# Start the background sensor immediately on boot
-_hw_thread = threading.Thread(target=_hardware_monitor_loop, daemon=True)
-_hw_thread.start()
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 
 try:
     from llama_cpp import Llama as _Llama
@@ -97,23 +100,85 @@ except ImportError:
 _GGUF_WRITE_ALLOWED = False
 
 def find_gguf():
-    """Text .gguf — excludes filenames containing '(image)'."""
+    """Text .gguf — excludes filenames containing '(image)'. Auto-discovery fallback."""
     files = sorted(f for f in MATRIX_ROOT.glob("*.gguf")
                    if "(image)" not in f.name.lower())
     if files: return files[0]
-    # Fall back to working directory if not found at matrix root
     files = sorted(f for f in BASE.glob("*.gguf")
                    if "(image)" not in f.name.lower())
     return files[0] if files else None
 
 def find_image_gguf():
-    """Image .gguf — filename must contain '(image)'."""
+    """Image .gguf — filename must contain '(image)'. Auto-discovery fallback."""
     files = sorted(f for f in MATRIX_ROOT.glob("*.gguf")
                    if "(image)" in f.name.lower())
     if files: return files[0]
     files = sorted(f for f in BASE.glob("*.gguf")
                    if "(image)" in f.name.lower())
     return files[0] if files else None
+
+def _resolve_text_gguf(exp_flags):
+    """
+    Resolve text GGUF path through experimental flags when patch is active.
+    TEXT_GGUF_LOAD  off  → None (disabled, skip loading entirely)
+    TEXT_GGUF_PATH  auto → find_gguf() auto-discovery with (image) exclusion
+    TEXT_GGUF_PATH  <path> → use that path if it exists, else None
+    Patch absent → find_gguf() directly.
+    """
+    if not PATCH_ACTIVE:
+        return find_gguf()
+    if not is_feature_enabled(exp_flags, "TEXT_GGUF_LOAD"):
+        return None
+    val = get_config_value(exp_flags, "TEXT_GGUF_PATH", "auto").strip()
+    if val.lower() == "auto":
+        return find_gguf()
+    p = Path(val).expanduser()
+    if not p.is_absolute():
+        p = MATRIX_ROOT / p
+    return p if p.exists() else None
+
+def _resolve_image_gguf(exp_flags):
+    """
+    Resolve image GGUF path through experimental flags when patch is active.
+    IMAGE_GGUF_LOAD  off  → None (disabled, skip loading entirely)
+    IMAGE_GGUF_PATH  auto → find_image_gguf() auto-discovery
+    IMAGE_GGUF_PATH  <path> → use that path if it exists, else None
+    Patch absent → find_image_gguf() directly.
+    """
+    if not PATCH_ACTIVE:
+        return find_image_gguf()
+    if not is_feature_enabled(exp_flags, "IMAGE_GGUF_LOAD"):
+        return None
+    val = get_config_value(exp_flags, "IMAGE_GGUF_PATH", "auto").strip()
+    if val.lower() == "auto":
+        return find_image_gguf()
+    p = Path(val).expanduser()
+    if not p.is_absolute():
+        p = MATRIX_ROOT / p
+    return p if p.exists() else None
+
+def _resolve_mmproj(exp_flags):
+    """
+    Resolve the multimodal projection (.mmproj) file path for image GGUF.
+    IMAGE_GGUF_MMPROJ_PATH  auto → first *.mmproj in MATRIX_ROOT or BASE
+    IMAGE_GGUF_MMPROJ_PATH  <path> → use that path if it exists, else None
+    Patch absent → auto-discovery directly.
+    """
+    def _auto():
+        files = sorted(MATRIX_ROOT.glob("*.mmproj"))
+        if files: return files[0]
+        files = sorted(BASE.glob("*.mmproj"))
+        return files[0] if files else None
+
+    if not PATCH_ACTIVE:
+        return _auto()
+    val = get_config_value(exp_flags, "IMAGE_GGUF_MMPROJ_PATH", "auto").strip()
+    if val.lower() == "auto":
+        return _auto()
+    p = Path(val).expanduser()
+    if not p.is_absolute():
+        p = MATRIX_ROOT / p
+    return p if p.exists() else None
 
 # ── ENCYCLOPEDIA / RELIGION BLOCK PARSER ─────────────────────
 # Shared plain-text block format readable by both .py and .sh:
@@ -588,7 +653,7 @@ def _nvidia_smi():
         return []
 
 # ── PATHS ────────────────────────────────────────────────────
-BASE            = Path(__file__).resolve().parent  # The Anchor
+BASE            = Path.cwd()
 MATRIX_ROOT      = BASE.parent.parent                # Shared resources — walk up from tenant node
 GGUF_MODEL_PATH  = MATRIX_ROOT / "smollm2-360m.gguf" # Global shared brain, above tenant sandbox
 DGAPI           = BASE / "dgapi"
@@ -744,7 +809,7 @@ def persona_set_key(key, value):
     if not ELEVATED:
         return
     if PATCH_ACTIVE:
-        flags = load_experimental_flags(DATAS_DIR) if 'DATAS_DIR' in globals() else {}
+        flags = load_experimental_flags(DATAS_DIR) if 'DATAS_DIR' in dir() else {}
         # Governance check — but permission mode record at boot is always allowed
         if key not in ("PERMISSION_MODE", "LAST_STARTUP"):
             if not is_feature_enabled(flags, "PERSONA_SELF_MODIFICATION"):
@@ -1054,6 +1119,9 @@ class ImageGGUF:
             status("STATE: BOOTING | LOADING IMAGE GGUF")
             clip_candidates = sorted(MATRIX_ROOT.glob("*.mmproj"))
             clip_path = str(clip_candidates[0]) if clip_candidates else None
+            #if not clip_path:
+            #    clip_candidates = sorted(MATRIX_ROOT.glob("*.mmproj"))
+            #    clip_path = str(clip_candidates[0]) if clip_candidates else None
             kwargs = {"model_path":str(self.path),"n_ctx":2048,
                       "n_threads":4,"n_gpu_layers":0,"verbose":False}
             if clip_path: kwargs["clip_model_path"] = clip_path
@@ -1177,6 +1245,80 @@ def save_hardware_cache(profile):
         f"REASONING_TIER={profile.get('reasoning_tier','CPU_ONLY')}",
     ]
     HARDWARE_CACHE.write_text("\n".join(lines)+"\n",encoding="utf-8")
+
+
+# ── NON-BLOCKING LIVE HARDWARE SENSOR ─────────────────────────
+def _hardware_monitor_loop(stop_event=None):
+    """
+    Write lightweight live hardware telemetry without corrupting the
+    key=value hardware.cache used by load_hardware_cache().
+
+    Current architecture note:
+    - HARDWARE_CACHE remains the stable shared cache.
+    - hardware_live.txt is volatile telemetry for HUD/inspection.
+    """
+    try:
+        live_cache = SYSTEM_DIR / "hardware_live.txt"
+        live_cache.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+
+    while stop_event is None or not stop_event.is_set():
+        output = []
+
+        if PSUTIL and psutil is not None:
+            try:
+                cpu = psutil.cpu_percent(interval=None)
+                ram = psutil.virtual_memory().percent
+                output.append(f"CPU={cpu}%")
+                output.append(f"RAM={ram}%")
+            except Exception:
+                pass
+
+        try:
+            nv = _sp.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.used,memory.total,utilization.gpu,temperature.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+                stderr=_sp.DEVNULL,
+                timeout=2,
+            ).strip().split(", ")
+
+            if len(nv) == 4:
+                output.append(f"GPU_VRAM={nv[0]}MB/{nv[1]}MB")
+                output.append(f"GPU_UTIL={nv[2]}%")
+                output.append(f"GPU_TEMP={nv[3]}C")
+        except Exception:
+            pass
+
+        if output:
+            try:
+                live_cache.write_text(
+                    " | ".join(output) + f" | UPDATED={datetime.datetime.now().isoformat()}\n",
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+
+        time.sleep(5.0)
+
+
+def start_hardware_monitor_if_enabled(exp_flags):
+    """Start live telemetry only when experimental governance allows it."""
+    if PATCH_ACTIVE and not is_feature_enabled(exp_flags, "LIVE_HARDWARE_MONITOR"):
+        return None
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_hardware_monitor_loop,
+        args=(stop_event,),
+        daemon=True,
+        name="GoddessHardwareLiveMonitor",
+    )
+    thread.start()
+    return stop_event
 
 # ── SYSTEM PROFILER ──────────────────────────────────────────
 class SystemProfiler:
@@ -1385,6 +1527,7 @@ class IntakeProcessor:
         return sum(1 for f in files if self.process(f))
 
 # ── SELF-OPTIMIZATION ────────────────────────────────────────
+
 class Optimizer:
     def __init__(self):
         self._wake=threading.Event(); self._running=True; self.resting=False; self.gguf=None
@@ -1492,14 +1635,143 @@ class Optimizer:
         _GGUF_WRITE_ALLOWED = False
         return changes
 
+
+    def _autonomous_cognitive_pass(self):
+        """Allow the framework to inspect its state and choose a governed idle action."""
+        if not PATCH_ACTIVE:
+            return 0
+        flags = load_experimental_flags(DATAS_DIR)
+        if not is_feature_enabled(flags, "AUTONOMOUS_COGNITION"):
+            return 0
+        if not getattr(self, "gguf", None) or not self.gguf.available:
+            return 0
+
+        j_tail = "\n".join(
+            JOURNAL.read_text(encoding="utf-8", errors="ignore").splitlines()[-10:]
+        ) if JOURNAL.exists() else ""
+        rel_size = os.path.getsize(RELIGION) / 1024.0 if RELIGION.exists() else 0
+        dict_size = os.path.getsize(DICTIONARY) / 1024.0 if DICTIONARY.exists() else 0
+
+        prompt = (
+            "You are the Goddess Matrix, an autonomous structural framework. "
+            "Read your current system state and choose one safe maintenance action.\n"
+            f"Religion Queue (Unproven Theories): {rel_size:.1f} KB\n"
+            f"Dictionary (Established Facts): {dict_size:.1f} KB\n"
+            f"Recent Journal Events:\n{j_tail}\n\n"
+            "Reply with exactly one command:\n"
+            "[COMPRESS] if Religion queue is bloated\n"
+            "[REFACTOR] to audit and rewrite one Encyclopedia entry\n"
+            "[AESTHETICS] to critique/refine avatar presentation\n"
+            "[PONDER] to pick one Dictionary word and theorize on it\n"
+            "[IDLE] if no action is needed\n"
+            "Command:"
+        )
+
+        global _GGUF_WRITE_ALLOWED
+        old_gate = _GGUF_WRITE_ALLOWED
+        _GGUF_WRITE_ALLOWED = True
+        try:
+            decision = self.gguf._query(prompt, max_tokens=20).strip().upper()
+            changes = 0
+
+            if "[COMPRESS]" in decision:
+                journal_append("AUTONOMOUS DECISION: Triggering theory compression.")
+                if hasattr(self.gguf, "compress_old_theories"):
+                    changes += self.gguf.compress_old_theories()
+
+            elif "[REFACTOR]" in decision:
+                journal_append("AUTONOMOUS DECISION: Initiating Archivist Pass.")
+                changes += self._archivist_pass()
+
+            elif "[AESTHETICS]" in decision:
+                journal_append("AUTONOMOUS DECISION: Routing to Digital Mirror.")
+                changes += self._avatar_refinement_pass()
+
+            elif "[PONDER]" in decision:
+                if DICTIONARY.exists():
+                    words = re.findall(
+                        r'^(\S+) \(n\.\)',
+                        DICTIONARY.read_text(encoding="utf-8", errors="ignore"),
+                        re.M,
+                    )
+                    if words:
+                        target = random.choice(words)
+                        journal_append(f"AUTONOMOUS DECISION: Pondering known concept '{target}'.")
+                        self.gguf.enrich_word(target)
+                        changes += 1
+
+            elif "[IDLE]" in decision:
+                changes += 0
+
+            else:
+                journal_append(f"AUTONOMOUS DECISION FAILED: Unknown command [{decision[:40]}]")
+
+            return changes
+        finally:
+            _GGUF_WRITE_ALLOWED = old_gate
+
+    def _avatar_refinement_pass(self):
+        """Allow governed idle refinement of the avatar/visual layer."""
+        if not PATCH_ACTIVE:
+            return 0
+        flags = load_experimental_flags(DATAS_DIR)
+        changes = 0
+
+        if is_feature_enabled(flags, "AVATAR_CHOREOGRAPHY_EVOLUTION") and \
+                getattr(self, "gguf", None) and self.gguf.available:
+            prompt = (
+                "Generate a compact 4-step idle animation sequence for the Goddess Matrix avatar. "
+                "Use format: ACTION:speed -> ACTION:speed. "
+                "Available actions: BLINK, LOOK_LEFT, LOOK_RIGHT, TILT, BREATHE.\n"
+                "Sequence:"
+            )
+            choreo = self.gguf._query(prompt, max_tokens=50)
+            if choreo and "->" in choreo:
+                choreo_path = VIRTUAL_DIR / "avatar_choreography.txt"
+                choreo_path.write_text(choreo, encoding="utf-8")
+                journal_append(f"MOTOR CORTEX: Evolved idle animation to [{choreo}]")
+                changes += 1
+
+        if is_feature_enabled(flags, "AVATAR_AESTHETIC_REFINEMENT"):
+            active_img = VIRTUAL_DIR / "avatar_active.png"
+            image_gguf = getattr(self, "image_gguf", None)
+            if active_img.exists() and image_gguf and getattr(image_gguf, "available", False):
+                critique = image_gguf.describe_image(str(active_img))
+                if critique:
+                    global _GGUF_WRITE_ALLOWED
+                    old_gate = _GGUF_WRITE_ALLOWED
+                    _GGUF_WRITE_ALLOWED = True
+                    try:
+                        religion_propose_theory(
+                            "aesthetic_feedback",
+                            "TOPIC",
+                            topic="Current Avatar Presentation",
+                            proposed_text=f"Visual Critique: {critique}",
+                            source="Image GGUF Optic Nerve",
+                        )
+                    finally:
+                        _GGUF_WRITE_ALLOWED = old_gate
+                    journal_append("OPTIC FEEDBACK: Logged visual critique for next render cycle.")
+                    changes += 1
+
+        return changes
+
     def pass_(self):
         self.pass_count = getattr(self, "pass_count", 0) + 1
+
         d = self._opt_dictionary()
         t = self._opt_thesaurus()
         a = self._opt_almanac()
         r = religion_score_theories()  # scores theory queue; no write gate needed
         arch = self._archivist_pass() if self.pass_count % 5 == 0 else 0
-        return d + t + a + r + arch
+
+        # Avatar refinement is governed and lower frequency to avoid visual churn.
+        av = self._avatar_refinement_pass() if self.pass_count % 10 == 0 else 0
+
+        # Autonomous cognition is governed and can choose compression/refactor/ponder/etc.
+        cog = self._autonomous_cognitive_pass() if self.pass_count % 3 == 0 else 0
+
+        return d + t + a + r + arch + av + cog
 
     def wake(self): self._wake.set()
     def stop(self): self._running=False; self._wake.set()
@@ -1537,7 +1809,57 @@ class IntakeWatcher:
 
     def start(self):
         t=threading.Thread(target=self.loop,daemon=True); t.start(); return t
+# ── System Mood Self Optimizer loop ─────────────────────────────────────────
+class EntropyHarvester:
+    def __init__(self):
+        self.battery_present = False
+        self.simulated_battery_level = 95  # The phantom AC baseline for desktops
+        
+        # Startup Detection: Check if a physical battery exists
+        if PSUTIL and psutil is not None:
+            batt = psutil.sensors_battery()
+            if batt is not None:
+                self.battery_present = True
 
+    def get_stress_level(self):
+        """Returns an organic stress metric from 2 to 100."""
+        
+        # ── 1. The Computational Senses (Load Average) ──
+        try:
+            load1, load5, load15 = os.getloadavg()
+            # Scale 0.0-4.0 into a 0-100 range
+            load_stress = min(100.0, load1 * 25.0)
+        except Exception:
+            load_stress = 2.0  # Fail-safe silence
+
+        # ── 2. The Chemical Senses (Lithium-Ion State) ──
+        if self.battery_present:
+            batt = psutil.sensors_battery()
+            if batt:
+                # 100% battery = 0 stress. 10% battery = 90 stress.
+                batt_stress = 100.0 - batt.percent
+                
+                # Apply the chemical penalty if discharging
+                if not batt.power_plugged:
+                    batt_stress += 15.0
+                
+                batt_stress = min(100.0, batt_stress)
+            else:
+                batt_stress = 100.0 - self.simulated_battery_level
+        else:
+            # Desktop fallback: Phantom battery sits at 95% (5 stress)
+            batt_stress = 100.0 - self.simulated_battery_level
+
+        # ── 3. The Homeostatic Balance ──
+        if self.battery_present:
+            # Average the physical drain and the computational load equally
+            final_stress = (load_stress + batt_stress) / 2.0
+        else:
+            # On a desktop, the phantom battery provides a baseline, 
+            # but the loadavg dictates the actual mood shifts.
+            final_stress = load_stress + batt_stress
+            
+        return max(2, min(100, int(final_stress)))
 # ── REASONING ENGINE ─────────────────────────────────────────
 class ReasoningEngine:
     def __init__(self,profile): self.tier=profile.get("reasoning_tier","CPU_ONLY")
@@ -1551,8 +1873,6 @@ class ReasoningEngine:
             idx=text.lower().find(term)
             while idx>=0:
                 results.append(text[max(0,idx-80):min(len(text),idx+300)].strip())
-                if PATCH_ACTIVE:
-                    update_entry_last_seen(fp, term)
                 idx=text.lower().find(term,idx+1)
                 if len(results)>=3: break
         return results
@@ -1675,6 +1995,7 @@ class GoddessAPISystem:
         self.tool_state={}        # name -> enabled|disabled
         self.response_lengths=[]  # recent response lengths for de-escalation tracking
         self.exp_flags={}         # loaded at startup from experimental.txt
+        self.hardware_monitor_stop=None
         signal.signal(signal.SIGINT,self._sig); signal.signal(signal.SIGTERM,self._sig)
 
     def _sig(self,*_): self.shutdown()
@@ -1722,6 +2043,10 @@ class GoddessAPISystem:
         else:
             self.exp_flags = {}
         # ─────────────────────────────────────────────────────────────
+
+        self.hardware_monitor_stop = start_hardware_monitor_if_enabled(self.exp_flags)
+        if self.hardware_monitor_stop is not None:
+            journal_append("Live hardware monitor online: dgapi/system/hardware_live.txt")
 
         status("STATE: BOOTING | HARDWARE SCAN")
         cfg=load_hardware_cache()
@@ -1771,36 +2096,40 @@ class GoddessAPISystem:
             vocab_set("TOOL_COUNT", str(len(self.manifests)), prefix="py:")
         # ─────────────────────────────────────────────────────────────
 
-        # ── GGUF DUAL-RAIL LOADING ───────────────────────────────────
-        global _GGUF_WRITE_ALLOWED
-        
-        # 1. TEXT GGUF
-        if not PATCH_ACTIVE or is_feature_enabled(self.exp_flags, "TEXT_GGUF_LOAD"):
-            gguf_path = find_gguf()
-            if gguf_path:
-                _GGUF_WRITE_ALLOWED = True
-                self.gguf = GGUFEncyclopedia(gguf_path)
-                self.gguf.startup_enrichment()
-                _GGUF_WRITE_ALLOWED = False
-                self.optimizer.gguf = self.gguf
-                chat(f"  Text GGUF         -> {gguf_path.name}")
-            else:
-                chat("  Text GGUF         -> NOT FOUND")
-        else:
-            chat("  Text GGUF         -> DISABLED")
+        # ── GGUF ENCYCLOPEDIA — startup event ────────────────────────
+        # TEXT_GGUF_LOAD / TEXT_GGUF_PATH govern whether and which model loads.
+        # 'auto' delegates to find_gguf() which applies the (image) exclusion.
+        gguf_path = _resolve_text_gguf(self.exp_flags)
+        if gguf_path is None and PATCH_ACTIVE and \
+                not is_feature_enabled(self.exp_flags, "TEXT_GGUF_LOAD"):
+            chat("Text GGUF disabled via TEXT_GGUF_LOAD in experimental.txt.")
+        if gguf_path:
+            global _GGUF_WRITE_ALLOWED
+            _GGUF_WRITE_ALLOWED = True
+            self.gguf = GGUFEncyclopedia(gguf_path)
+            self.gguf.startup_enrichment()
+            _GGUF_WRITE_ALLOWED = False
+            self.optimizer.gguf = self.gguf
+        # ─────────────────────────────────────────────────────────────
 
-        # 2. IMAGE GGUF
-        if not PATCH_ACTIVE or is_feature_enabled(self.exp_flags, "IMAGE_GGUF_INTAKE"):
-            img_gguf_path = find_image_gguf()
-            if img_gguf_path:
-                self.image_gguf = ImageGGUF(img_gguf_path)
-                if self.image_gguf.available:
-                    vocab_set("IMAGE_GGUF_PRESENT", "true", prefix="py:")
-                    chat(f"  Image GGUF        -> {img_gguf_path.name}")
-            else:
-                chat("  Image GGUF        -> NOT FOUND")
-        else:
-            chat("  Image GGUF        -> DISABLED")
+        # ── IMAGE GGUF — startup event ────────────────────────────────
+        # IMAGE_GGUF_LOAD gates whether the model loads at all.
+        # IMAGE_GGUF_PATH resolves which model file to use.
+        # IMAGE_GGUF_MMPROJ_PATH resolves the multimodal projection file.
+        # IMAGE_GGUF_INTAKE (separate flag) gates whether loaded intake
+        # images are actually processed through the model.
+        img_gguf_path = _resolve_image_gguf(self.exp_flags)
+        if img_gguf_path is None and PATCH_ACTIVE and \
+                not is_feature_enabled(self.exp_flags, "IMAGE_GGUF_LOAD"):
+            chat("Image GGUF disabled via IMAGE_GGUF_LOAD in experimental.txt.")
+        elif img_gguf_path:
+            mmproj_path = _resolve_mmproj(self.exp_flags)
+            self.image_gguf = ImageGGUF(img_gguf_path, mmproj=mmproj_path)
+            if self.image_gguf.available:
+                vocab_set("IMAGE_GGUF_PRESENT", "true", prefix="py:")
+                if mmproj_path:
+                    vocab_set("IMAGE_GGUF_MMPROJ", str(mmproj_path), prefix="py:")
+        self.optimizer.image_gguf = self.image_gguf
         # ─────────────────────────────────────────────────────────────
 
         self.greeting_text=build_greeting(self.profile,self.session_start,off_s,intake_count)
@@ -1874,7 +2203,6 @@ class GoddessAPISystem:
                                           "DE_ESCALATION_SENSITIVITY", default=3)):
             # Trim to summary: take first paragraph only
             trimmed = response.split("\n\n")[0] if "\n\n" in response else response
-            trimmed = de_escalation_note() + "\n" + trimmed
             journal_append(f"DE_ESCALATION: trimmed {len(response)} → {len(trimmed)} chars")
             response = trimmed
         # Track response length for future de-escalation checks
@@ -1952,7 +2280,6 @@ class GoddessAPISystem:
 if __name__=="__main__":
     GoddessAPISystem().run()
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # MERGE / CONTRIBUTION NOTES — ChatGPT
 #
@@ -1968,3 +2295,10 @@ if __name__=="__main__":
 # 5. Kept current-file write gating and runtime structure intact while merging
 #    the missing backup functionality.
 # ─────────────────────────────────────────────────────────────────────────────
+#check energyConsumption, entropy for ai.
+# 6. Merged current-development autonomous features from the larger GoddessAPI variant:
+#    - live hardware telemetry monitor (safe hardware_live.txt, non-corrupting)
+#    - governed autonomous cognition pass
+#    - governed avatar/choreography refinement pass
+#    - optimizer scheduling for archivist/avatar/autonomous passes
+#    - optimizer link to image_gguf for visual critique.
