@@ -4,46 +4,51 @@ package modular.game;
  * IceSandbox.java
  *
  * Main game panel for the Goddess Matrix game engine.
- *
- * The player stands on a small sphere floating in a void.
- * The sphere size is set by the total file size in modular/game/.
- * Empty folder = 3ft diameter (player is ~1.8x taller than the planet).
+ * Player stands on a sphere whose size is determined by the
+ * total file count in modular/game/. The world is built from
+ * SDF ray marching over spheres derived from knowledge files.
  *
  * LAYER OWNERSHIP:
- *   Void background (far)   → Java geometry + C/ASM image hook
- *   Space between           → Java (particles, lighting, depth)
- *   Sphere geometry         → Java
- *   Sphere texture          → Python (GGUF or rule-based), Java fallback
- *   Player figure           → Java (stick figure V1, sprite future)
- *   In-game text content    → Python (via [GAME_NARRATE:] tags)
- *   In-game text rendering  → Java
- *   UI panels (E key)       → Java frame, Python content
- *   Timing                  → ASM script (fallback: Java nanoTime loop)
+ *   Void background       → VoidRenderer (C/ASM images + starfield)
+ *   3D scene / planet     → SphereRenderer (SDF ray march)
+ *   Side panels (E key)   → SidePanels (Java frame, Python content)
+ *   Refresh overlay (ESC) → RefreshOverlay
+ *   In-game text content  → Python via [GAME_NARRATE:] tags
+ *   In-game text render   → Java (IceSandbox)
+ *   Timing                → TimingBridge (ASM binary or Java fallback)
+ *   Physics               → PlayerPhysics
+ *   AI events             → GameProtocol → game_events.txt → GoddessAPI.sh
+ *   C key conduit         → GameProtocol.sendToPython() → direct Python stdin
  *
- * LAUNCH CONTEXT DETECTION:
- *   Launched via Game.java (Matrix) → matrixContext = true
- *     MatrixState reference available
- *     Protocol tags wired through ApiBridge
- *     Exit handled by [Game] button in Matrix UI
- *     ESC click does not exit
- *   Launched via main() (standalone terminal) → matrixContext = false
- *     No MatrixState
- *     Standalone exit: ESC overlay click OR E panel exit button
- *     Full game operational without any external systems
+ * LAUNCH DETECTION:
+ *   Matrix context  → IceSandbox(gameDir, dgapiSysDir, true)
+ *     Embedded in ImageViewer manifest panel via Game.java
+ *     Python stdin set by Game.java after construction
+ *     ESC overlay click → restoreManifest (set by Game.java callback)
+ *     Right-click [Game] → cinematic fullscreen (Keyboard.java)
+ *   Standalone      → IceSandbox() — no-arg constructor
+ *     Runs in its own JFrame via main()
+ *     ESC overlay click → exit game
+ *     E panel shows EXIT button
  *
  * KEY BINDINGS:
- *   WASD  — walk on sphere surface
- *   SPACE — jump (radial outward, gravity returns player)
- *   ESC   — toggle refresh/timing overlay (MODE_OVERLAY)
- *   E     — toggle side panels (MODE_PANELS)
+ *   WASD   — walk on sphere surface
+ *   SPACE  — jump
+ *   ESC    — toggle timing/rate overlay (MODE_OVERLAY)
+ *   E      — toggle side panels (MODE_PANELS)
+ *   C      — toggle AI chat conduit (direct Python stdin)
+ *            When open: typed text → avatar speech prompt
+ *            ENTER sends, ESC closes
+ *
+ * HIBERFILE:
+ *   Loaded on startEngine, saved on stopEngine.
+ *   Cache hash validated — fast resume if knowledge files unchanged.
  *
  * Contributors:
- *   Gemini (Google)        — original IceSandbox physics and renderer concept
- *   Derek Jason Gilhousen — planet-as-world design, layer ownership philosophy,
- *                           timing mode system, panel design, context detection
- *   Claude (Anthropic)    — IceSandbox rewrite integrating all subsystems,
- *                           spherical physics, key handling, render pipeline,
- *                           context detection, timing bridge wiring
+ *   Gemini (Google)        — original engine concept and physics
+ *   Derek Jason Gilhousen — world design, layer ownership, C key conduit,
+ *                           material philosophy, scale tier system
+ *   Claude (Anthropic)    — IceSandbox integration of all subsystems
  */
 
 import javax.swing.*;
@@ -51,48 +56,50 @@ import java.awt.*;
 import java.awt.event.*;
 import java.io.File;
 
-public class IceSandbox extends JPanel implements Runnable, KeyListener, MouseListener, MouseMotionListener 
+public class IceSandbox extends JPanel
+        implements Runnable, KeyListener, MouseListener, MouseMotionListener
 {
     // ── SUBSYSTEMS ────────────────────────────────────────────────────────────
-    private final WorldState     world;
-    private final TimingBridge   timing;
-    private final PlayerPhysics  physics;
-    private final PlanetScaler   scaler;
-    private final SphereRenderer sphereRenderer;
-    private final VoidRenderer   voidRenderer;
-    private final RefreshOverlay refreshOverlay;
-    private final SidePanels     sidePanels;
-    private final GameProtocol   protocol;
+    private final WorldState      world;
+    private final TimingBridge    timing;
+    private final PlayerPhysics   physics;
+    private final PlanetScaler    scaler;
+    private final SphereRenderer  sphereRenderer;
+    private final VoidRenderer    voidRenderer;
+    private final RefreshOverlay  refreshOverlay;
+    private final SidePanels      sidePanels;
+    private final GameProtocol    protocol;
+    private final GameHiberfile   hiberfile;
 
     // ── ENGINE ────────────────────────────────────────────────────────────────
-    private Thread renderThread;
-    private float  renderPhase = 0.0f;
+    private Thread  renderThread;
+    private float   renderPhase = 0f;
 
     // ── CONTEXT ───────────────────────────────────────────────────────────────
-    private final boolean isStandalone;    // true = no GoddessMatrix present
-    private final File    gameDir;         // modular/game/
-    private final File    dgapiSystemDir;  // fn/fn{N}/dgapi/system/ or null
+    private final boolean isStandalone;
+    private final File    gameDir;
+    private final File    dgapiSystemDir;
 
-    // Jump counter for event writing
+    // ── C KEY CHAT STATE ──────────────────────────────────────────────────────
+    private final StringBuilder chatInputBuffer = new StringBuilder();
+    private static final int    MAX_CHAT_INPUT  = 200;
+
+    // ── COUNTERS ──────────────────────────────────────────────────────────────
     private int jumpCount = 0;
 
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
      * Matrix-context constructor. Called by Game.java.
-     * MatrixState reference used for dgapi path resolution.
-     *
-     * @param gameDir        absolute path to modular/game/
-     * @param dgapiSystemDir absolute path to active session's dgapi/system/
-     * @param isMatrix       always true when called from Game.java
+     * After construction, Game.java should call:
+     *   protocol.setPythonStdin(state.apiStdinMap.get(state.currentSession))
      */
-    public IceSandbox(File gameDir, File dgapiSystemDir, boolean isMatrix) 
+    public IceSandbox(File gameDir, File dgapiSystemDir, boolean isMatrix)
     {
         this.gameDir        = gameDir;
         this.dgapiSystemDir = dgapiSystemDir;
         this.isStandalone   = !isMatrix;
 
-        // ── INIT SUBSYSTEMS ───────────────────────────────────────────────────
         world          = new WorldState();
         world.launchedFromMatrix = isMatrix;
 
@@ -103,33 +110,26 @@ public class IceSandbox extends JPanel implements Runnable, KeyListener, MouseLi
         voidRenderer   = new VoidRenderer(new File(gameDir, "images"));
         refreshOverlay = new RefreshOverlay();
         sidePanels     = new SidePanels();
+        hiberfile      = new GameHiberfile(gameDir);
 
-        File dgapiDir = dgapiSystemDir != null ? dgapiSystemDir.getParentFile() : null;
+        File dgapiDir = (dgapiSystemDir != null)
+                      ? dgapiSystemDir.getParentFile() : null;
         protocol = new GameProtocol(world, sidePanels, gameDir, dgapiDir, isMatrix);
 
-        // Write session enter event
-        // [BASH AI HOOK: session start logged to game_events.txt]
-        protocol.writeSessionEnterEvent(1); // TODO: pass actual FN node from MatrixState
-
-        // Set initial planet scale
-        world.planetDiameterFeet = scaler.getDiameter();
+        world.voidImagesDir = new File(gameDir, "images");
 
         // Standalone exit callbacks
-        if (isStandalone) 
+        if (isStandalone)
         {
-            Runnable exitAction = () -> {
+            Runnable exit = () -> {
                 stopEngine();
                 Window w = SwingUtilities.getWindowAncestor(this);
                 if (w != null) w.dispose();
             };
-            refreshOverlay.setStandaloneExitCallback(exitAction);
-            sidePanels.setStandaloneExitCallback(exitAction);
+            refreshOverlay.setStandaloneExitCallback(exit);
+            sidePanels.setStandaloneExitCallback(exit);
         }
 
-        // Set void images dir for hot-reload
-        world.voidImagesDir = new File(gameDir, "images");
-
-        // ── SWING SETUP ───────────────────────────────────────────────────────
         setBackground(new Color(2, 4, 10));
         setFocusable(true);
         addKeyListener(this);
@@ -137,79 +137,124 @@ public class IceSandbox extends JPanel implements Runnable, KeyListener, MouseLi
         addMouseMotionListener(this);
     }
 
-    /**
-     * Standalone constructor. Called by main() for terminal launches.
-     * No MatrixState available. Full game operational without AI systems.
-     */
-    public IceSandbox() 
+    /** Standalone constructor — no Matrix context. */
+    public IceSandbox()
     {
         this(resolveStandaloneGameDir(), null, false);
     }
 
-    private static File resolveStandaloneGameDir() 
+    private static File resolveStandaloneGameDir()
     {
-        // When run standalone, game dir is relative to the class location
         File f = new File("modular/game");
-        if (!f.exists()) f.mkdirs();
+        f.mkdirs();
         return f;
     }
 
     // ── ENGINE CONTROL ────────────────────────────────────────────────────────
 
-    public void startEngine() 
+    public void startEngine()
     {
-        if (renderThread == null) 
-        {
-            renderThread = new Thread(this, "IceSandbox-RenderLoop");
-            renderThread.setDaemon(true);
-            renderThread.start();
-        }
+        if (renderThread != null) return;
+
+        // Load hiberfile — fast resume if cache valid
+        boolean cacheValid = hiberfile.load(world);
+        scaler.applyToWorld(world);
+
+        // Apply planet gravity to active session
+        int fn = world.activePlanet;
+        world.planets[fn] = buildPlanet(fn);
+
+        protocol.writeSessionEnterEvent(fn);
+
+        renderThread = new Thread(this, "IceSandbox-RenderLoop");
+        renderThread.setDaemon(true);
+        renderThread.start();
     }
 
-    public void stopEngine() 
+    public void stopEngine()
     {
-        protocol.writeSessionExitEvent(1); // TODO: pass actual FN node
+        protocol.writeJumpEvent(world.playerAltitudeFeet, jumpCount);
+        protocol.writeSessionExitEvent(world.activePlanet);
+        hiberfile.save(world);
         timing.shutdown();
         renderThread = null;
+    }
+
+    // ── PLANET BUILDER ────────────────────────────────────────────────────────
+    // Constructs a SystemPlanet record for the given fn node.
+    // In a full implementation this would scan the fn directory and
+    // build TerrainSpheres from txt file contents.
+    // For V1: sets orbital properties and gravity, terrain populated later.
+
+    private WorldState.SystemPlanet buildPlanet(int fn)
+    {
+        WorldState.SystemPlanet p = new WorldState.SystemPlanet();
+        p.fnNode         = fn;
+        p.celestialName  = WorldState.celestialName(fn);
+        p.orbitRadius    = WorldState.orbitalRadius(fn);
+        p.gravity        = WorldState.baseGravity(fn);
+        p.axialTiltDeg   = WorldState.axialTilt(fn);
+        p.isSun          = (fn == WorldState.FN_SUN);
+        p.isAsteroidBelt = (fn == WorldState.FN_ASTEROID_BELT);
+        p.hasRings       = (fn == WorldState.FN_SATURN);
+        p.isUserNamed    = (fn == WorldState.FN_KUIPER);
+        p.bedrockCount   = scaler.getBedrockCount();
+        p.coreRadius     = scaler.getPlanetCoreRadius();
+
+        // Resolve fn directory if Matrix context
+        if (dgapiSystemDir != null)
+        {
+            File fnBase = dgapiSystemDir.getParentFile()  // dgapi/
+                                        .getParentFile()  // fn{N}/
+                                        .getParentFile()  // fn base
+                                        .getParentFile(); // root
+            File fnDir  = new File(fnBase, "fn/fn" + fn);
+            if (fnDir.exists())
+            {
+                p.fnDirectory      = fnDir;
+                p.encyclopediaFile = new File(fnDir, "dgapi/virtual/encyclopedia.txt");
+                p.dictionaryFile   = new File(fnDir, "dgapi/datas/dictionary.txt");
+                p.almanacFile      = new File(fnDir, "dgapi/datas/almanac.txt");
+                p.religionFile     = new File(fnDir, "dgapi/virtual/religion.txt");
+                p.personaFile      = new File(fnDir, "dgapi/virtual/persona.txt");
+                p.journalFile      = new File(fnDir, "dgapi/datas/journal.txt");
+            }
+        }
+
+        return p;
     }
 
     // ── GAME LOOP ─────────────────────────────────────────────────────────────
 
     @Override
-    public void run() 
+    public void run()
     {
-        long lastTime = System.nanoTime();
+        long lastTime  = System.nanoTime();
         long logicAccum = 0;
-        final long LOGIC_TICK_NS = 81_000_000L; // 81ms — matches Matrix LOGIC_TICK_MS
+        final long LOGIC_TICK_NS = 81_000_000L;
 
-        while (renderThread != null) 
+        while (renderThread != null)
         {
             long now   = System.nanoTime();
             long delta = now - lastTime;
             lastTime   = now;
 
-            // ── TIMING TICK ───────────────────────────────────────────────────
-            // [ASM HOOK: TimingBridge.getTickNanos() returns ASM value when present]
-            long tickNs = timing.getTickNanos();
-
-            // Logic tick — physics and game state, decoupled from render rate
             logicAccum += delta;
-            if (logicAccum >= LOGIC_TICK_NS) 
+            if (logicAccum >= LOGIC_TICK_NS)
             {
                 updateLogic();
                 logicAccum -= LOGIC_TICK_NS;
             }
 
-            // Render phase advance — drives waveform and animation
-            renderPhase += 0.04f;
+            renderPhase += 0.03f;
             if (renderPhase > (float)(Math.PI * 2)) renderPhase -= (float)(Math.PI * 2);
 
             repaint();
 
-            // Sleep to match current timing mode
+            long tickNs  = timing.getTickNanos();
             long elapsed = System.nanoTime() - now;
             long sleepNs = tickNs - elapsed;
-            if (sleepNs > 0) 
+            if (sleepNs > 0)
             {
                 try { Thread.sleep(sleepNs / 1_000_000, (int)(sleepNs % 1_000_000)); }
                 catch (InterruptedException ignored) {}
@@ -219,134 +264,141 @@ public class IceSandbox extends JPanel implements Runnable, KeyListener, MouseLi
 
     // ── LOGIC UPDATE ──────────────────────────────────────────────────────────
 
-    private void updateLogic() 
+    private void updateLogic()
     {
-        // Update planet scale periodically
-        world.planetDiameterFeet = scaler.getDiameter();
+        scaler.applyToWorld(world);
 
-        // Advance physics
-        physics.tick(world.planetDiameterFeet / 2.0f);
-        physics.writeToWorld(world);
+        // Gravity from active planet
+        WorldState.SystemPlanet planet = world.planets[world.activePlanet];
+        float gravity = (planet != null) ? planet.gravity : 1.0f;
+        float radius  = (planet != null) ? planet.coreRadius : scaler.getPlanetCoreRadius();
+
+        physics.tick(radius, gravity);
+        physics.writeToWorld(world, radius);
 
         // Panel slide animation
-        if (world.panelSlideProgress != world.panelSlideTarget) 
-        {
-            float diff = world.panelSlideTarget - world.panelSlideProgress;
-            if (Math.abs(diff) < WorldState.PANEL_SLIDE_SPEED) 
-            {
-                world.panelSlideProgress = world.panelSlideTarget;
-            } 
-            else 
-            {
-                world.panelSlideProgress += Math.signum(diff) * WorldState.PANEL_SLIDE_SPEED;
-            }
-        }
+        float diff = world.panelSlideTarget - world.panelSlideProgress;
+        if (Math.abs(diff) < WorldState.PANEL_SLIDE_SPEED)
+            world.panelSlideProgress = world.panelSlideTarget;
+        else
+            world.panelSlideProgress += Math.signum(diff) * WorldState.PANEL_SLIDE_SPEED;
 
-        // Poll hardware telemetry from Python's live file
-        // [PYTHON HOOK: hardware_live.txt — atmosphere driven by CPU/GPU load]
+        // Hardware telemetry → atmosphere + avatar glow
         protocol.pollHardwareTelemetry(dgapiSystemDir);
+
+        // Advance orbital angles
+        for (int i = 1; i <= 12; i++)
+        {
+            world.orbitAngles[i] += 0.01f; // slow orbit, visual only
+            if (world.orbitAngles[i] >= 360f) world.orbitAngles[i] -= 360f;
+        }
 
         // Narrate text expiry
         if (!world.narrateText.isEmpty()
-                && System.currentTimeMillis() > world.narrateExpireMs) 
-        {
+                && System.currentTimeMillis() > world.narrateExpireMs)
             world.narrateText = "";
-        }
     }
 
     // ── PAINT ─────────────────────────────────────────────────────────────────
 
     @Override
-    protected void paintComponent(Graphics g) 
+    protected void paintComponent(Graphics g)
     {
         super.paintComponent(g);
         Graphics2D g2 = (Graphics2D) g;
-
-        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,      RenderingHints.VALUE_ANTIALIAS_ON);
-        g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-        g2.setRenderingHint(RenderingHints.KEY_RENDERING,         RenderingHints.VALUE_RENDER_QUALITY);
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                            RenderingHints.VALUE_ANTIALIAS_ON);
+        g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                            RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
         int W = getWidth();
         int H = getHeight();
 
-        // ── 1. VOID BACKGROUND ────────────────────────────────────────────────
-        // [C/ASM HOOK: void images composited here — see VoidRenderer]
+        // 1. Void background (C/ASM images + starfield + aurora)
         voidRenderer.render(g2, world, W, H, renderPhase);
 
-        // ── 2. PLANET SPHERE ──────────────────────────────────────────────────
-        // Sphere positioned at lower-center — player appears to stand on top
-        float sphereCX   = W / 2.0f;
-        float sphereCY   = H * 0.62f;                   // slightly below center
-        float feetToPixels = Math.min(W, H) / 12.0f;    // scale: ~12ft fills screen
-        float screenRadius = (world.planetDiameterFeet / 2.0f) * feetToPixels;
+        // 2. SDF ray march (planet, terrain, player, avatar)
+        //    SphereRenderer should use TYPE_INT_ARGB with transparent sky pixels
+        //    so background shows through void space. See SphereRenderer note.
+        sphereRenderer.render(g2, world, W, H);
 
-        // [PYTHON HOOK: sphere texture loaded in SphereRenderer if present]
-        sphereRenderer.render(g2, world, sphereCX, sphereCY, screenRadius, feetToPixels);
-
-        // ── 3. SIDE PANELS (E key) ────────────────────────────────────────────
-        // [PYTHON HOOK: panel content set via [PANEL_UPDATE:] tags — see SidePanels]
+        // 3. Side panels (E key)
         sidePanels.render(g2, world, W, H, isStandalone);
 
-        // ── 4. NARRATE TEXT ───────────────────────────────────────────────────
-        // [PYTHON HOOK: text content from [GAME_NARRATE:] tags]
+        // 4. Narrate text (content from Python, position from Java)
         if (!world.narrateText.isEmpty()
-                && System.currentTimeMillis() < world.narrateExpireMs) 
-        {
+                && System.currentTimeMillis() < world.narrateExpireMs)
             renderNarrateText(g2, W, H);
-        }
 
-        // ── 5. REFRESH OVERLAY (ESC) ──────────────────────────────────────────
-        if (world.overlayVisible) 
-        {
+        // 5. C key chat input prompt
+        if (world.avatarChatOpen) renderChatInput(g2, W, H);
+
+        // 6. ESC overlay
+        if (world.overlayVisible)
             refreshOverlay.render(g2, W, H, timing, scaler, isStandalone);
-        }
 
-        // ── 6. MODE INDICATOR (always visible, bottom-right corner) ───────────
+        // 7. Mode indicator (always visible, bottom-right)
         renderModeIndicator(g2, W, H);
     }
 
-    // ── NARRATE TEXT ──────────────────────────────────────────────────────────
+    // ── TEXT RENDERS ──────────────────────────────────────────────────────────
 
-    private void renderNarrateText(Graphics2D g, int W, int H) 
+    private void renderNarrateText(Graphics2D g, int W, int H)
     {
-        // Narrate text appears above the sphere, centered
-        // Content: Python-owned. Rendering position/style: Java-owned.
-        long remaining  = world.narrateExpireMs - System.currentTimeMillis();
-        float fadeAlpha = Math.min(1.0f, remaining / 1000.0f);
-        int alpha       = (int)(fadeAlpha * 200);
+        long  rem   = world.narrateExpireMs - System.currentTimeMillis();
+        float alpha = Math.min(1f, rem / 1000f);
+        int   a     = (int)(alpha * 200);
 
         g.setFont(new Font("Monospaced", Font.ITALIC, 12));
         FontMetrics fm = g.getFontMetrics();
         String text    = world.narrateText;
-        int tx         = (W - fm.stringWidth(text)) / 2;
-        int ty         = (int)(H * 0.32f);
+        int    tx      = (W - fm.stringWidth(text)) / 2;
+        int    ty      = (int)(H * 0.28f);
 
-        // Shadow
-        g.setColor(new Color(0, 0, 0, alpha / 2));
+        g.setColor(new Color(0, 0, 0, a / 2));
         g.drawString(text, tx + 1, ty + 1);
-
-        // Text
-        g.setColor(new Color(220, 235, 255, alpha));
+        g.setColor(new Color(220, 200, 255, a));
         g.drawString(text, tx, ty);
     }
 
-    // ── MODE INDICATOR ────────────────────────────────────────────────────────
+    private void renderChatInput(Graphics2D g, int W, int H)
+    {
+        // C key chat conduit input prompt
+        // Content the user types routes directly to Python stdin
+        String prompt  = "> " + chatInputBuffer + "_";
+        int    boxW    = Math.min(W - 40, 500);
+        int    boxX    = (W - boxW) / 2;
+        int    boxY    = (int)(H * 0.75f);
 
-    private void renderModeIndicator(Graphics2D g, int W, int H) 
+        g.setColor(new Color(8, 10, 20, 210));
+        g.fillRoundRect(boxX, boxY, boxW, 28, 8, 8);
+        g.setColor(new Color(157, 80, 187, 180));
+        g.setStroke(new BasicStroke(1f));
+        g.drawRoundRect(boxX, boxY, boxW, 28, 8, 8);
+
+        g.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        g.setColor(new Color(220, 200, 255, 220));
+        g.drawString(prompt, boxX + 10, boxY + 18);
+
+        g.setFont(new Font("Monospaced", Font.PLAIN, 8));
+        g.setColor(new Color(148, 163, 184, 140));
+        g.drawString("ENTER=send  ESC=close", boxX + boxW - 130, boxY + 18);
+    }
+
+    private void renderModeIndicator(Graphics2D g, int W, int H)
     {
         g.setFont(new Font("Monospaced", Font.PLAIN, 8));
         g.setColor(new Color(80, 60, 110, 140));
-
-        String asmStr = timing.isASMPresent() ? "ASM" : "JAVA";
+        String asmStr  = timing.isASMPresent() ? "ASM" : "JAVA";
         String modeStr;
-        switch (world.timingMode) 
+        switch (world.timingMode)
         {
-            case TimingBridge.MODE_OVERLAY: modeStr = "ESC"; break;
-            case TimingBridge.MODE_PANELS:  modeStr = "E";   break;
+            case TimingBridge.MODE_OVERLAY: modeStr = "ESC";  break;
+            case TimingBridge.MODE_PANELS:  modeStr = "E";    break;
             default:                        modeStr = "PLAY"; break;
         }
-
-        String label = asmStr + " | " + timing.getDisplayRate() + " | " + modeStr;
+        String label = asmStr + " | " + timing.getDisplayRate() + " | " + modeStr
+                     + " | " + WorldState.celestialName(world.activePlanet);
         FontMetrics fm = g.getFontMetrics();
         g.drawString(label, W - fm.stringWidth(label) - 8, H - 8);
     }
@@ -354,47 +406,91 @@ public class IceSandbox extends JPanel implements Runnable, KeyListener, MouseLi
     // ── KEY HANDLER ───────────────────────────────────────────────────────────
 
     @Override
-    public void keyPressed(KeyEvent e) 
+    public void keyPressed(KeyEvent e)
     {
         int key = e.getKeyCode();
 
-        // Movement → physics
+        // C key chat conduit — ESC to close, ENTER to send
+        if (world.avatarChatOpen)
+        {
+            if (key == KeyEvent.VK_ESCAPE)
+            {
+                world.avatarChatOpen = false;
+                chatInputBuffer.setLength(0);
+            }
+            else if (key == KeyEvent.VK_ENTER)
+            {
+                String text = chatInputBuffer.toString().trim();
+                if (!text.isEmpty()) protocol.sendToPython(text);
+                chatInputBuffer.setLength(0);
+            }
+            else if (key == KeyEvent.VK_BACK_SPACE && chatInputBuffer.length() > 0)
+            {
+                chatInputBuffer.deleteCharAt(chatInputBuffer.length() - 1);
+            }
+            return; // all other keys consumed while chat is open
+        }
+
+        // Movement
         if (key == KeyEvent.VK_A) physics.setMoveLeft(true);
         if (key == KeyEvent.VK_D) physics.setMoveRight(true);
-        if (key == KeyEvent.VK_W) physics.setMoveForward(true);
-        if (key == KeyEvent.VK_S) physics.setMoveBack(true);
+        if (key == KeyEvent.VK_W) world.cameraPitchDeg = Math.max(-60f, world.cameraPitchDeg - 2f);
+        if (key == KeyEvent.VK_S) world.cameraPitchDeg = Math.min(60f, world.cameraPitchDeg + 2f);
 
-        if (key == KeyEvent.VK_SPACE) 
+        if (key == KeyEvent.VK_SPACE)
         {
             physics.requestJump();
             jumpCount++;
-            // [BASH AI HOOK: jump events accumulated, written on session exit]
         }
 
-        // ESC — toggle refresh overlay, switch to MODE_OVERLAY
-        if (key == KeyEvent.VK_ESCAPE) 
+        // ESC — refresh/timing overlay
+        if (key == KeyEvent.VK_ESCAPE)
         {
             world.overlayVisible = !world.overlayVisible;
             world.timingMode = world.overlayVisible
                 ? TimingBridge.MODE_OVERLAY
-                : (world.panelsVisible ? TimingBridge.MODE_PANELS : TimingBridge.MODE_GAMEPLAY);
+                : (world.panelsVisible ? TimingBridge.MODE_PANELS
+                                       : TimingBridge.MODE_GAMEPLAY);
             timing.setMode(world.timingMode);
         }
 
-        // E — toggle side panels, switch to MODE_PANELS
-        if (key == KeyEvent.VK_E) 
+        // E — side panels
+        if (key == KeyEvent.VK_E)
         {
-            world.panelsVisible   = !world.panelsVisible;
-            world.panelSlideTarget = world.panelsVisible ? 1.0f : 0.0f;
+            world.panelsVisible    = !world.panelsVisible;
+            world.panelSlideTarget = world.panelsVisible ? 1f : 0f;
             world.timingMode = world.panelsVisible
                 ? TimingBridge.MODE_PANELS
-                : (world.overlayVisible ? TimingBridge.MODE_OVERLAY : TimingBridge.MODE_GAMEPLAY);
+                : (world.overlayVisible ? TimingBridge.MODE_OVERLAY
+                                        : TimingBridge.MODE_GAMEPLAY);
             timing.setMode(world.timingMode);
+        }
+
+        // C — chat conduit toggle
+        if (key == KeyEvent.VK_C)
+        {
+            world.avatarChatOpen = !world.avatarChatOpen;
+            chatInputBuffer.setLength(0);
+            if (!world.avatarChatOpen) world.avatarSpeechText = "";
         }
     }
 
     @Override
-    public void keyReleased(KeyEvent e) 
+    public void keyTyped(KeyEvent e)
+    {
+        // Capture printable characters when C key chat is open
+        if (world.avatarChatOpen)
+        {
+            char c = e.getKeyChar();
+            if (c >= 32 && c < 127 && chatInputBuffer.length() < MAX_CHAT_INPUT)
+            {
+                chatInputBuffer.append(c);
+            }
+        }
+    }
+
+    @Override
+    public void keyReleased(KeyEvent e)
     {
         int key = e.getKeyCode();
         if (key == KeyEvent.VK_A) physics.setMoveLeft(false);
@@ -403,78 +499,54 @@ public class IceSandbox extends JPanel implements Runnable, KeyListener, MouseLi
         if (key == KeyEvent.VK_S) physics.setMoveBack(false);
     }
 
-    @Override public void keyTyped(KeyEvent e) {}
-
     // ── MOUSE HANDLERS ────────────────────────────────────────────────────────
 
     @Override
-    public void mouseMoved(MouseEvent e) 
+    public void mouseMoved(MouseEvent e)
     {
-        if (world.overlayVisible) 
-        {
+        if (world.overlayVisible)
             refreshOverlay.onMouseMove(e.getX(), e.getY(), getWidth());
-        }
-        if (world.panelsVisible) 
-        {
+        if (world.panelsVisible)
             sidePanels.onMouseMove(e.getX(), e.getY(), getWidth(), getHeight(),
                                    world.panelSlideProgress);
-        }
     }
 
     @Override
-    public void mouseClicked(MouseEvent e) 
+    public void mouseClicked(MouseEvent e)
     {
-        if (world.overlayVisible) 
-        {
+        if (world.overlayVisible)
             refreshOverlay.onMouseClick(e.getX(), e.getY(), getWidth(), isStandalone);
-        }
-        if (world.panelsVisible) 
-        {
+        if (world.panelsVisible)
             sidePanels.onMouseClick(e.getX(), e.getY(), getWidth(), getHeight(),
                                     world.panelSlideProgress, isStandalone);
-        }
     }
 
-    @Override public void mouseDragged(MouseEvent e) {}
+    @Override public void mouseDragged(MouseEvent e)  {}
     @Override public void mousePressed(MouseEvent e)  {}
     @Override public void mouseReleased(MouseEvent e) {}
     @Override public void mouseEntered(MouseEvent e)  {}
     @Override public void mouseExited(MouseEvent e)   {}
 
-    // ── GAME PROTOCOL ACCESSOR ────────────────────────────────────────────────
-    // Called by Game.java to wire this into ApiBridge.
-    // [HOOK: Game.java sets state.gameProtocol = sandbox.getProtocol()]
+    // ── ACCESSORS ─────────────────────────────────────────────────────────────
 
     public GameProtocol getProtocol() { return protocol; }
 
-    /**
-     * Sets the callback fired when the user clicks the refresh rate display
-     * in the ESC overlay while in Matrix context.
-     * Game.java sets this to imageViewer.restoreManifest() so clicking the
-     * rate display exits fullscreen cinematic mode.
-     * In standalone context this is set to the game exit action instead.
-     */
     public void setFullscreenExitCallback(Runnable cb)
     {
         refreshOverlay.setRateClickCallback(cb);
     }
 
-    // ── STANDALONE TEST WRAPPER ───────────────────────────────────────────────
-    // Full game functional without GoddessMatrix, GoddessAPI.py, or ASM present.
-    // Run: java -cp . modular.game.IceSandbox
-    // (or uncomment and compile directly)
+    // ── STANDALONE ENTRY POINT ────────────────────────────────────────────────
 
-    public static void main(String[] args) 
+    public static void main(String[] args)
     {
-        SwingUtilities.invokeLater(() -> 
-        {
-            JFrame frame = new JFrame("ICE SANDBOX — Standalone Mode");
+        SwingUtilities.invokeLater(() -> {
+            JFrame frame = new JFrame("ICE SANDBOX — Standalone");
             frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
             frame.setSize(800, 600);
             frame.setLocationRelativeTo(null);
             frame.getContentPane().setBackground(new Color(2, 4, 10));
-
-            IceSandbox sandbox = new IceSandbox(); // standalone constructor
+            IceSandbox sandbox = new IceSandbox();
             frame.add(sandbox);
             frame.setVisible(true);
             sandbox.requestFocusInWindow();
