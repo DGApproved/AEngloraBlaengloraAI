@@ -45,9 +45,12 @@ package modular;
 
 import system.MatrixState;
 import modular.game.IceSandbox;
+import modular.game.WorldState;
+import modular.game.GameProtocol;
 
 import javax.swing.*;
 import java.io.File;
+import java.io.PrintWriter;
 
 public class Game
 {
@@ -88,6 +91,12 @@ public class Game
                 {
                     state.imageViewer.startGameMode(sandboxInstance);
                     sandboxInstance.startEngine();
+
+                    state.isGameModeActive = true;
+
+                    PrintWriter stdin = state.apiStdinMap.get(state.currentSession);
+                    if (stdin != null) sandboxInstance.getProtocol().setPythonStdin(stdin);
+                    state.gameProtocol = sandboxInstance.getProtocol();
 
                     // Clicking the ESC overlay rate display exits fullscreen
                     // (restores manifest from cinematic passthrough mode).
@@ -132,6 +141,8 @@ public class Game
         {
             state.imageViewer.stopGameMode();
         }
+        
+        state.isGameModeActive = false;
         // [APIBRIGE HOOK] — uncomment when ready:
         // state.gameProtocol = null;
 
