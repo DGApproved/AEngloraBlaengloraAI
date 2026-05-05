@@ -3,44 +3,38 @@ package modular.game;
 /*
  * VoidRenderer.java
  *
- * Renders the void surrounding the planet sphere.
+ * Renders the background void layer beneath the SDF ray march composite.
  *
- * Java owns:
- *   - Background fill (deep space gradient)
- *   - Procedural starfield (fallback, always operational)
- *   - Image compositing and rotation as player moves
- *   - Atmosphere/weather effects (aurora, fog, storm)
+ * RENDER ORDER (IceSandbox.paintComponent):
+ *   1. VoidRenderer.render()   — background: images, starfield, aurora
+ *   2. SphereRenderer.render() — SDF ray march composited on top
+ *      SphereRenderer uses TYPE_INT_ARGB with transparent sky pixels
+ *      so the VoidRenderer background shows through void space.
  *
- * C/ASM owns (via image file hook):
- *   - Void background image generation
- *   - Written to: modular/game/images/
- *   - File format: PNG, any resolution (scaled to screen)
- *   - Java scans the directory and composites all found images
- *   - Multiple images layered at different depths (parallax)
- *   - If directory empty or absent: starfield fallback (fully operational)
+ * LAYER OWNERSHIP:
+ *   C/ASM programs generate void background images:
+ *     modular/game/images/void_layer_0.png (furthest back)
+ *     modular/game/images/void_layer_1.png
+ *     ... etc
+ *   Java renders and parallax-scrolls them.
+ *   If images absent: procedural starfield fallback (always operational).
  *
- * C/ASM IMAGE HOOK:
- *   C and ASM programs in modular/game/ generate void background images.
- *   These might be procedural nebulae, fractal noise fields, or other
- *   generative graphics that would be slow in Java but fast in native code.
- *   VoidRenderer scans modular/game/images/ at startup and when
- *   WorldState.voidImagesDirty is true (set by GameProtocol on file change).
- *   Images are named: void_layer_{N}.png where N is the depth order.
- *   Lower N = further back (lower parallax multiplier).
+ * AURORA:
+ *   Intensity driven by WorldState.gpuUtil (from hardware_live.txt).
+ *   GPU utilization → brighter aurora. Rendered as wavy horizontal bands.
  *
- * PYTHON ATMOSPHERE HOOK:
- *   weatherIntensity, weatherType from WorldState drive effect overlays.
- *   Values set by GameProtocol when [WORLD_EVENT:type:intensity] received.
- *   hardware_live.txt CPU load → storm intensity (read on logic tick).
+ * WEATHER OVERLAY:
+ *   Fog, storm, clear driven by WorldState.weatherType/weatherIntensity.
+ *   Set by GameProtocol when [WORLD_EVENT:] tag received from Python.
  *
  * Contributors:
- *   Gemini (Google)        — original starfield + parallax concept
- *   Derek Jason Gilhousen — void/C/ASM layer design
- *   Claude (Anthropic)    — VoidRenderer, image hooks, atmosphere effects
+ *   Gemini (Google)        — original starfield concept
+ *   Derek Jason Gilhousen — C/ASM void image layer design
+ *   Claude (Anthropic)    — VoidRenderer, background composite role
  */
 
 import java.awt.*;
-import java.awt.geom.*;
+import java.awt.geom.GeneralPath;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
@@ -49,252 +43,234 @@ import java.util.List;
 import java.util.Random;
 import javax.imageio.ImageIO;
 
-public class VoidRenderer 
+public class VoidRenderer
 {
-    // ── STARFIELD (procedural fallback) ───────────────────────────────────────
+    // ── STARFIELD ─────────────────────────────────────────────────────────────
     private static final int STAR_COUNT = 300;
-    private final int[]   starAngle;     // 0-359 degrees longitude
-    private final int[]   starElev;      // -90 to +90 degrees latitude
-    private final float[] starBrightness;// 0.5 - 1.0
-    private final float[] starSize;      // 1.0 - 2.5
+    private final int[]   starAngle;
+    private final int[]   starElev;
+    private final float[] starBright;
+    private final float[] starSize;
 
-    // ── VOID IMAGE LAYERS (C/ASM generated) ───────────────────────────────────
+    // ── C/ASM IMAGE LAYERS ────────────────────────────────────────────────────
     private final List<BufferedImage> voidLayers = new ArrayList<>();
     private File lastImagesDir = null;
 
-    // ── AURORA PARTICLES ──────────────────────────────────────────────────────
-    // Driven by GPU utilization from hardware_live.txt when Python is running.
-    // Java generates aurora geometry; Python governs intensity via WorldState.
-    private float[] auroraPhase;
-    private static final int AURORA_BANDS = 5;
+    // ── AURORA ────────────────────────────────────────────────────────────────
+    private final float[] auroraPhase = new float[5];
+
+    // ── STAR BODIES (assets/ and system/ folders) ─────────────────────────────
+    // Rendered as bright distant points in addition to the procedural starfield.
+    // Populated from WorldState.stars by IceSandbox at load time.
 
     // ─────────────────────────────────────────────────────────────────────────
 
-    public VoidRenderer(File imagesDir) 
+    public VoidRenderer(File imagesDir)
     {
-        // Generate procedural starfield
-        Random rand = new Random(42); // seeded for consistency
+        Random rand    = new Random(42); // seeded — consistent starfield
         starAngle      = new int[STAR_COUNT];
         starElev       = new int[STAR_COUNT];
-        starBrightness = new float[STAR_COUNT];
+        starBright     = new float[STAR_COUNT];
         starSize       = new float[STAR_COUNT];
 
-        for (int i = 0; i < STAR_COUNT; i++) 
+        for (int i = 0; i < STAR_COUNT; i++)
         {
-            starAngle[i]      = rand.nextInt(360);
-            starElev[i]       = rand.nextInt(181) - 90;
-            starBrightness[i] = 0.5f + rand.nextFloat() * 0.5f;
-            starSize[i]       = 1.0f + rand.nextFloat() * 1.5f;
+            starAngle[i]  = rand.nextInt(360);
+            starElev[i]   = rand.nextInt(181) - 90;
+            starBright[i] = 0.5f + rand.nextFloat() * 0.5f;
+            starSize[i]   = 1.0f + rand.nextFloat() * 1.5f;
         }
 
-        auroraPhase = new float[AURORA_BANDS];
-        for (int i = 0; i < AURORA_BANDS; i++) auroraPhase[i] = i * 0.4f;
+        for (int i = 0; i < auroraPhase.length; i++) auroraPhase[i] = i * 0.4f;
 
-        // Load C/ASM void images if available
-        if (imagesDir != null && imagesDir.exists()) 
-        {
-            loadVoidImages(imagesDir);
-        }
+        if (imagesDir != null && imagesDir.exists()) loadVoidImages(imagesDir);
     }
 
     // ── RENDER ────────────────────────────────────────────────────────────────
 
-    public void render(Graphics2D g, WorldState world,
-                       int width, int height, float renderPhase) 
+    public void render(Graphics2D g, WorldState world, int W, int H, float phase)
     {
-        // Reload void images if C/ASM programs have generated new ones
-        if (world.voidImagesDirty && world.voidImagesDir != null) 
+        // Reload C/ASM images if new ones have been generated
+        if (world.voidImagesDirty && world.voidImagesDir != null)
         {
             loadVoidImages(world.voidImagesDir);
             world.voidImagesDirty = false;
         }
 
         // Advance aurora phase
-        for (int i = 0; i < AURORA_BANDS; i++) auroraPhase[i] += 0.02f;
+        for (int i = 0; i < auroraPhase.length; i++) auroraPhase[i] += 0.015f;
 
-        // ── DEEP SPACE BACKGROUND ─────────────────────────────────────────────
-        GradientPaint bg = new GradientPaint(
-            0, 0,      new Color(2,  4,  10),
-            0, height, new Color(8,  12, 25)
-        );
-        g.setPaint(bg);
-        g.fillRect(0, 0, width, height);
+        // 1. Deep space gradient
+        g.setPaint(new GradientPaint(0, 0, new Color(2, 4, 10),
+                                     0, H, new Color(8, 12, 25)));
+        g.fillRect(0, 0, W, H);
 
-        // ── C/ASM VOID IMAGE LAYERS ────────────────────────────────────────────
-        // [C/ASM HOOK: VOID IMAGES]
-        // Each layer composited at a different parallax depth.
-        // Deeper layers (lower index) rotate slower with player movement.
-        if (!voidLayers.isEmpty()) 
-        {
-            renderVoidImageLayers(g, world, width, height);
-        }
+        // 2. C/ASM void image layers (parallax, back to front)
+        if (!voidLayers.isEmpty()) renderImageLayers(g, world, W, H);
 
-        // ── PROCEDURAL STARFIELD ──────────────────────────────────────────────
-        // Always rendered — stars show through gaps in void images
-        // or as the complete background when no images are present.
-        renderStarfield(g, world, width, height);
+        // 3. Procedural starfield
+        renderStarfield(g, world, W, H);
 
-        // ── AURORA (GPU utilization → intensity) ──────────────────────────────
-        // [PYTHON HOOK: hardware_live.txt GPU_UTIL]
-        // When Python monitor thread writes GPU utilization, WorldState.gpuUtil
-        // is updated on the logic tick. Higher GPU util = brighter aurora.
-        float auroraIntensity = Math.max(world.gpuUtil / 100.0f,
-                                          world.weatherIntensity / 200.0f);
-        if (auroraIntensity > 0.05f) 
-        {
-            renderAurora(g, width, height, auroraIntensity, renderPhase);
-        }
+        // 4. Named star bodies from assets/ and system/ folders
+        renderNamedStars(g, world, W, H);
 
-        // ── WEATHER OVERLAY ───────────────────────────────────────────────────
-        // [PYTHON HOOK: WORLD_EVENT]
-        if (world.weatherIntensity > 5.0f) 
-        {
-            renderWeather(g, world, width, height, renderPhase);
-        }
+        // 5. Aurora (GPU utilization driven)
+        float auroraIntensity = Math.max(world.gpuUtil / 100f,
+                                          world.weatherIntensity / 200f);
+        if (auroraIntensity > 0.05f) renderAurora(g, W, H, auroraIntensity);
+
+        // 6. Weather overlay
+        if (world.weatherIntensity > 5f) renderWeather(g, world, W, H);
     }
 
     // ── STARFIELD ─────────────────────────────────────────────────────────────
 
-    private void renderStarfield(Graphics2D g, WorldState world, int W, int H) 
+    private void renderStarfield(Graphics2D g, WorldState world, int W, int H)
     {
-        float playerAngle = world.playerAngleDeg;
-
-        for (int i = 0; i < STAR_COUNT; i++) 
+        for (int i = 0; i < STAR_COUNT; i++)
         {
-            // Stars parallax slightly slower than planet rotation
-            float parallax = 0.6f;
-            int renderAngle = (int)(starAngle[i] - playerAngle * parallax + 360) % 360;
+            // Parallax relative to player angle — slower than planet rotation
+            float parallax  = 0.6f;
+            int   renderAng = (int)(starAngle[i] - world.playerAngleDeg * parallax + 360) % 360;
+            int   sx        = (int)(W / 2f + (renderAng - 180) * (W / 360f));
+            int   sy        = (int)(H / 2f - starElev[i] * (H / 220f));
 
-            // Project from spherical to screen
-            int sx = (int)(W / 2.0f + (renderAngle - 180) * (W / 360.0f));
-            int sy = (int)(H / 2.0f - starElev[i] * (H / 220.0f));
-
-            // Only render above the approximate horizon
             if (sy > H * 0.65f) continue;
-
-            // Wrap horizontal
             sx = ((sx % W) + W) % W;
 
-            int alpha = (int)(starBrightness[i] * 220);
+            int alpha = (int)(starBright[i] * 220);
             g.setColor(new Color(220, 230, 255, alpha));
             float sz = starSize[i];
-            g.fill(new Ellipse2D.Float(sx - sz / 2, sy - sz / 2, sz, sz));
+            g.fillOval((int)(sx - sz/2), (int)(sy - sz/2), (int)sz, (int)sz);
         }
     }
 
-    // ── C/ASM VOID IMAGE LAYERS ───────────────────────────────────────────────
+    // ── NAMED STARS (assets/ and system/ reference bodies) ───────────────────
 
-    private void renderVoidImageLayers(Graphics2D g, WorldState world, int W, int H) 
+    private void renderNamedStars(Graphics2D g, WorldState world, int W, int H)
     {
-        // [C/ASM HOOK: IMAGE COMPOSITING]
-        // Layers drawn back to front. Each successive layer has stronger parallax.
-        for (int i = 0; i < voidLayers.size(); i++) 
+        if (world.stars == null || world.stars.isEmpty()) return;
+
+        for (WorldState.StarBody star : world.stars)
         {
-            BufferedImage img   = voidLayers.get(i);
-            float parallaxMult  = 0.1f + (i * 0.15f); // deeper = slower
-            float offset        = (world.playerAngleDeg * parallaxMult) % W;
+            // Project far star to screen using a simple angular mapping
+            // Stars are at very large distances — treat as directional
+            float normalizedX = star.x / 500f;  // normalize from world scale
+            float normalizedY = star.y / 500f;
+
+            int sx = (int)(W/2f + normalizedX * W * 0.4f);
+            int sy = (int)(H/2f - normalizedY * H * 0.4f);
+
+            if (sx < 0 || sx >= W || sy < 0 || sy >= H) continue;
+
+            int   alpha  = (int)(star.brightness * 255);
+            int   radius = (int)(star.radius * 2);
+            Color base   = new Color(255, 245, 220, alpha);
+
+            // Glow falloff
+            for (int r = radius * 3; r >= 1; r--)
+            {
+                float falloff = (float) r / (radius * 3f);
+                int   a       = (int)(alpha * (1f - falloff) * 0.5f);
+                g.setColor(new Color(255, 245, 220, Math.min(255, a)));
+                g.fillOval(sx - r, sy - r, r*2, r*2);
+            }
+            g.setColor(base);
+            g.fillOval(sx - radius, sy - radius, radius*2, radius*2);
+        }
+    }
+
+    // ── C/ASM IMAGE LAYERS ────────────────────────────────────────────────────
+
+    private void renderImageLayers(Graphics2D g, WorldState world, int W, int H)
+    {
+        for (int i = 0; i < voidLayers.size(); i++)
+        {
+            BufferedImage img      = voidLayers.get(i);
+            float         parallax = 0.1f + i * 0.15f;
+            float         offset   = (world.playerAngleDeg * parallax) % W;
 
             AlphaComposite ac = AlphaComposite.getInstance(
-                AlphaComposite.SRC_OVER,
-                0.6f + i * 0.1f   // deeper layers more transparent
-            );
+                AlphaComposite.SRC_OVER, 0.5f + i * 0.1f);
             g.setComposite(ac);
 
-            // Draw image scrolling with player angle
-            int drawX = (int)(-offset);
-            g.drawImage(img, drawX,          0, W, (int)(H * 0.65f), null);
-            g.drawImage(img, drawX + W,      0, W, (int)(H * 0.65f), null);
-            g.drawImage(img, drawX + W * 2,  0, W, (int)(H * 0.65f), null);
+            int horizH = (int)(H * 0.65f);
+            int drawX  = (int)(-offset);
+            g.drawImage(img, drawX,      0, W, horizH, null);
+            g.drawImage(img, drawX + W,  0, W, horizH, null);
+            g.drawImage(img, drawX + W*2, 0, W, horizH, null);
 
             g.setComposite(AlphaComposite.SrcOver);
         }
     }
 
-    private void loadVoidImages(File imagesDir) 
+    private void loadVoidImages(File dir)
     {
         voidLayers.clear();
-        if (imagesDir == null || !imagesDir.exists()) return;
-        lastImagesDir = imagesDir;
-
-        // Load void_layer_0.png, void_layer_1.png, etc. in order
-        for (int i = 0; i < 8; i++) 
+        lastImagesDir = dir;
+        for (int i = 0; i < 8; i++)
         {
-            File f = new File(imagesDir, "void_layer_" + i + ".png");
+            File f = new File(dir, "void_layer_" + i + ".png");
             if (!f.exists()) break;
-            try 
-            {
-                voidLayers.add(ImageIO.read(f));
-            } 
+            try   { voidLayers.add(ImageIO.read(f)); }
             catch (IOException ignored) {}
         }
     }
 
     // ── AURORA ────────────────────────────────────────────────────────────────
 
-    private void renderAurora(Graphics2D g, int W, int H,
-                               float intensity, float phase) 
+    private void renderAurora(Graphics2D g, int W, int H, float intensity)
     {
-        int auroraH = (int)(H * 0.3f);
+        int bandCount = auroraPhase.length;
+        int auroraH   = (int)(H * 0.3f);
 
-        for (int band = 0; band < AURORA_BANDS; band++) 
+        for (int band = 0; band < bandCount; band++)
         {
-            float bandPhase = auroraPhase[band];
-            int alpha = (int)(intensity * 60 * (1.0f - band * 0.15f));
+            int   alpha = (int)(intensity * 55 * (1f - band * 0.15f));
             if (alpha < 5) continue;
 
-            // Each band is a wavy horizontal stripe
             Color c;
-            switch (band % 3) 
+            switch (band % 3)
             {
-                case 0: c = new Color(80,  220, 120, alpha); break;
-                case 1: c = new Color(80,  150, 220, alpha); break;
-                default: c = new Color(157, 80,  187, alpha); break;
+                case 0:  c = new Color(80,  220, 120, alpha); break;
+                case 1:  c = new Color(80,  150, 220, alpha); break;
+                default: c = new Color(157,  80, 187, alpha); break;
             }
 
-            GeneralPath bandShape = new GeneralPath();
-            float bandY = H * 0.1f + band * (auroraH / (float)AURORA_BANDS);
-            bandShape.moveTo(0, bandY);
+            float        bandY = H * 0.08f + band * (auroraH / (float)bandCount);
+            GeneralPath  path  = new GeneralPath();
+            path.moveTo(0, bandY);
 
-            for (int x = 0; x <= W; x += 8) 
+            for (int x = 0; x <= W; x += 8)
             {
-                float y = bandY + (float)(Math.sin(x * 0.01f + bandPhase) * 15
-                                         * intensity);
-                bandShape.lineTo(x, y);
+                float y = bandY + (float)(
+                    Math.sin(x * 0.01 + auroraPhase[band]) * 12 * intensity);
+                path.lineTo(x, y);
             }
-            bandShape.lineTo(W, bandY + auroraH / (float)AURORA_BANDS);
-            bandShape.lineTo(0, bandY + auroraH / (float)AURORA_BANDS);
-            bandShape.closePath();
+            path.lineTo(W,  bandY + auroraH / (float)bandCount);
+            path.lineTo(0,  bandY + auroraH / (float)bandCount);
+            path.closePath();
 
             g.setColor(c);
-            g.fill(bandShape);
+            g.fill(path);
         }
     }
 
     // ── WEATHER ───────────────────────────────────────────────────────────────
 
-    private void renderWeather(Graphics2D g, WorldState world,
-                                int W, int H, float phase) 
+    private void renderWeather(Graphics2D g, WorldState world, int W, int H)
     {
-        float intensity = world.weatherIntensity / 100.0f;
-
-        switch (world.weatherType) 
+        float t = world.weatherIntensity / 100f;
+        switch (world.weatherType)
         {
             case "fog":
-                g.setColor(new Color(180, 200, 220, (int)(intensity * 60)));
+                g.setColor(new Color(180, 200, 220, (int)(t * 55)));
                 g.fillRect(0, 0, W, H);
                 break;
-
             case "storm":
-                // Fast-moving dark overlay
-                g.setColor(new Color(10, 15, 30, (int)(intensity * 80)));
+                g.setColor(new Color(10, 15, 30, (int)(t * 70)));
                 g.fillRect(0, 0, W, H);
                 break;
-
-            case "aurora":
-                // Extra aurora pass at high intensity
-                renderAurora(g, W, H, intensity * 1.5f, phase * 2);
-                break;
-
             default:
                 break;
         }
