@@ -3,385 +3,434 @@ package modular.game;
 /*
  * SidePanels.java
  *
- * Four side panels that slide in from all screen edges when E is pressed.
+ * Four side panels sliding in from screen edges when E is pressed.
  *
- * Geometry:
- *   - Four panels: top, bottom, left, right
- *   - Outer corners: flush with screen edge (sharp)
- *   - Inner corners: rounded (facing the game world)
- *   - Game world remains visible behind panels
- *   - Panels slide in/out animated via WorldState.panelSlideProgress
+ * PANEL ASSIGNMENTS:
+ *   TOP    — Three-mode celestial clock (Standard / Hybrid / Aengloria)
+ *   RIGHT  — Compact calendar (Standard / Celestial / Cotsworth)
+ *   LEFT   — Options / settings (Python-driven via PANEL_UPDATE)
+ *   BOTTOM — Inventory + standalone EXIT button
  *
- * Panel assignments (V1 placeholder content):
- *   TOP    — status / narrative display
- *   BOTTOM — inventory (placeholder)
- *   LEFT   — options / settings (placeholder)
- *   RIGHT  — knowledge index (placeholder, links to encyclopedia entries)
+ * CLOCK DISPLAY:
+ *   All three modes visible simultaneously.
+ *   Hybrid second shown in [brackets] when ≥ 60 (drift territory).
+ *   Drift is intentional — two incommensurate subdivisions sharing one display.
+ *   Midnight sync indicator when all three align at 00:00:00.
  *
- * PYTHON CONTENT HOOKS:
- *   Panel text content is Python-owned.
- *   Java owns: layout, animation, rendering frame.
- *   Python populates via protocol tags (future [PANEL_UPDATE:side:content]).
- *   For V1: panels show static placeholder content.
- *   narrateText from WorldState is displayed in the top panel.
+ * CALENDAR DISPLAY:
+ *   Compact monthly grid. Today highlighted gold.
+ *   Header tap cycles calendar mode. Three modes via CelestialClock.
  *
- * STANDALONE EXIT:
- *   In standalone mode, bottom panel includes an EXIT button.
- *   In Matrix mode: no exit button. [Game] button handles exit.
+ * GEOMETRY:
+ *   Outer corners flush with screen edge.
+ *   Inner corners (facing game world) rounded at CORNER_R.
+ *   Game world visible behind panels.
+ *   Animated via WorldState.panelSlideProgress.
  *
  * Contributors:
- *   Derek Jason Gilhousen — E panel concept, rounded inner corner design,
- *                           exit button logic per context
- *   Claude (Anthropic)    — SidePanels implementation, GeneralPath panel
- *                           geometry, animation, content slots
+ *   Derek Jason Gilhousen — panel design, three-phase clock concept,
+ *                           drift mechanics, calendar systems
+ *   Claude (Anthropic)    — SidePanels implementation
  */
 
 import java.awt.*;
 import java.awt.geom.GeneralPath;
-import java.awt.geom.RoundRectangle2D;
 
-public class SidePanels 
+public class SidePanels
 {
     // ── LAYOUT ────────────────────────────────────────────────────────────────
-    private static final int TOP_HEIGHT    = 80;
+    private static final int TOP_HEIGHT    = 90;
     private static final int BOTTOM_HEIGHT = 80;
-    private static final int SIDE_WIDTH    = 120;
-    private static final int CORNER_R      = 18;   // inner corner radius
+    private static final int SIDE_WIDTH    = 130;
+    private static final int CORNER_R      = 18;
 
     // ── COLORS ────────────────────────────────────────────────────────────────
-    private static final Color PANEL_BG     = new Color(5,   8,   18,  220);
-    private static final Color PANEL_BORDER = new Color(157, 80,  187, 120);
-    private static final Color TEXT_TITLE   = new Color(250, 205, 104);
-    private static final Color TEXT_DIM     = new Color(148, 163, 184);
-    private static final Color EXIT_BG      = new Color(239, 68,  68,  160);
-    private static final Color EXIT_HOVER   = new Color(239, 68,  68,  220);
+    private static final Color BG          = new Color(5,   8,   18,  225);
+    private static final Color BORDER      = new Color(157, 80,  187, 130);
+    private static final Color TEXT_TITLE  = new Color(250, 205, 104);
+    private static final Color TEXT_DIM    = new Color(148, 163, 184);
+    private static final Color TEXT_BRIGHT = new Color(220, 235, 255);
+    private static final Color COL_STD     = new Color(80,  150, 255);
+    private static final Color COL_HYB     = new Color(255, 215, 0);
+    private static final Color COL_AENG    = new Color(157, 80,  187);
+    private static final Color COL_DRIFT   = new Color(239, 68,  68,  210);
+    private static final Color COL_SYNC    = new Color(80,  220, 120);
+    private static final Color EXIT_NORM   = new Color(239, 68,  68,  160);
+    private static final Color EXIT_HOV    = new Color(239, 68,  68,  220);
 
     // ── STATE ─────────────────────────────────────────────────────────────────
-    private boolean exitHovered = false;
+    private boolean  exitHovered        = false;
+    public  boolean  calendarModeTapped = false;  // read by IceSandbox each tick
 
-    // Runnable called when EXIT button clicked in standalone mode
     private Runnable standaloneExitCallback = null;
+    private String   leftContent            = "";
+    private String   bottomContent          = "";
 
-    // [PYTHON HOOK: PANEL CONTENT]
-    // These strings are placeholders. Python will populate via [PANEL_UPDATE:] tags.
-    // Format: side=top|bottom|left|right, content=multi-line string
-    private String topContent    = "";
-    private String bottomContent = "";
-    private String leftContent   = "";
-    private String rightContent  = "";
+    public void setStandaloneExitCallback(Runnable cb) { standaloneExitCallback = cb; }
 
-    // ─────────────────────────────────────────────────────────────────────────
-
-    public void setStandaloneExitCallback(Runnable cb) 
+    public void setContent(String side, String content)
     {
-        this.standaloneExitCallback = cb;
-    }
-
-    // [PYTHON HOOK: PANEL_UPDATE tag handler]
-    public void setContent(String side, String content) 
-    {
-        switch (side) 
-        {
-            case "top":    topContent    = content; break;
-            case "bottom": bottomContent = content; break;
-            case "left":   leftContent   = content; break;
-            case "right":  rightContent  = content; break;
-        }
+        if ("left".equals(side))        leftContent   = content;
+        else if ("bottom".equals(side)) bottomContent = content;
     }
 
     // ── RENDER ────────────────────────────────────────────────────────────────
 
-    public void render(Graphics2D g, WorldState world,
-                       int W, int H, boolean isStandalone) 
+    public void render(Graphics2D g, WorldState world, int W, int H, boolean standalone)
     {
         if (world.panelSlideProgress <= 0.001f) return;
 
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                           RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                           RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
-        float p = world.panelSlideProgress; // 0.0 = closed, 1.0 = fully open
+        float p    = world.panelSlideProgress;
+        int topH   = (int)(TOP_HEIGHT    * p);
+        int botH   = (int)(BOTTOM_HEIGHT * p);
+        int leftW  = (int)(SIDE_WIDTH    * p);
+        int rightW = (int)(SIDE_WIDTH    * p);
 
-        // ── TOP PANEL ─────────────────────────────────────────────────────────
-        int topH = (int)(TOP_HEIGHT * p);
-        if (topH > 2) 
-        {
-            renderTopPanel(g, W, topH, world);
-        }
-
-        // ── BOTTOM PANEL ──────────────────────────────────────────────────────
-        int botH = (int)(BOTTOM_HEIGHT * p);
-        if (botH > 2) 
-        {
-            renderBottomPanel(g, W, H, botH, isStandalone);
-        }
-
-        // ── LEFT PANEL ────────────────────────────────────────────────────────
-        int leftW = (int)(SIDE_WIDTH * p);
-        if (leftW > 2) 
-        {
-            renderLeftPanel(g, H, leftW, topH, botH);
-        }
-
-        // ── RIGHT PANEL ───────────────────────────────────────────────────────
-        int rightW = (int)(SIDE_WIDTH * p);
-        if (rightW > 2) 
-        {
-            renderRightPanel(g, W, H, rightW, topH, botH);
-        }
+        if (topH   > 2) renderTop(g, W, topH, world);
+        if (botH   > 2) renderBottom(g, W, H, botH, standalone);
+        if (leftW  > 2) renderLeft(g, H, leftW, topH, botH);
+        if (rightW > 2) renderRight(g, W, H, rightW, topH, botH, world);
     }
 
-    // ── TOP PANEL ─────────────────────────────────────────────────────────────
+    // ── TOP — CELESTIAL CLOCK ─────────────────────────────────────────────────
 
-    private void renderTopPanel(Graphics2D g, int W, int panelH, WorldState world) 
+    private void renderTop(Graphics2D g, int W, int pH, WorldState world)
     {
-        // Shape: full width, top-flush outer corners, rounded inner (bottom) corners
-        GeneralPath shape = new GeneralPath();
-        shape.moveTo(0, 0);
-        shape.lineTo(W, 0);
-        shape.lineTo(W, panelH - CORNER_R);
-        shape.quadTo(W, panelH, W - CORNER_R, panelH);   // bottom-right inner
-        shape.lineTo(CORNER_R, panelH);
-        shape.quadTo(0, panelH, 0, panelH - CORNER_R);   // bottom-left inner
-        shape.closePath();
+        fill(g, shapeTop(W, pH));
 
-        g.setColor(PANEL_BG);
-        g.fill(shape);
-        g.setColor(PANEL_BORDER);
-        g.setStroke(new BasicStroke(1.2f));
-        g.draw(shape);
+        CelestialClock c = world.clock;
+        if (c == null || pH < 20) return;
 
-        // Content
+        int x = 10, y = 14, dy = 20;
+
+        // Standard
         g.setFont(new Font("Monospaced", Font.BOLD, 9));
-        g.setColor(TEXT_TITLE);
-        g.drawString("STATUS", 14, 16);
+        g.setColor(COL_STD);
+        g.drawString(String.format("STD  %02d:%02d:%02d %s",
+            c.stdH, c.stdM, c.stdS, c.stdPM ? "PM" : "AM"), x, y);
 
-        // Narrate text from Python
-        String narrate = world.narrateText;
-        if (narrate != null && !narrate.isEmpty()
-                && System.currentTimeMillis() < world.narrateExpireMs) 
+        // Hybrid — second may be in drift territory
+        if (pH > y + dy)
         {
-            g.setFont(new Font("Monospaced", Font.PLAIN, 10));
-            g.setColor(new Color(220, 235, 255, 200));
-            drawWrapped(g, narrate, 14, 30, W - 28, 12);
-        } 
-        else if (!topContent.isEmpty()) 
+            String base = String.format("HYB  %02d:%02d:", c.hybDispH, c.hybM);
+            g.setColor(COL_HYB);
+            g.drawString(base, x, y + dy);
+
+            FontMetrics fm = g.getFontMetrics();
+            int sx = x + fm.stringWidth(base);
+
+            if (c.hybridDrift)
+            {
+                g.setColor(COL_DRIFT);
+                g.drawString(String.format("[%02d]", c.hybS), sx, y + dy);
+                g.setColor(COL_HYB);
+                g.drawString(c.hybPM ? " PM" : " AM", sx + fm.stringWidth("[00]"), y + dy);
+            }
+            else
+            {
+                g.setColor(COL_HYB);
+                g.drawString(String.format("%02d %s", c.hybS,
+                    c.hybPM ? "PM" : "AM"), sx, y + dy);
+            }
+        }
+
+        // Aengloria
+        if (pH > y + dy * 2)
         {
-            // [PYTHON HOOK: top panel content from PANEL_UPDATE tag]
-            g.setFont(new Font("Monospaced", Font.PLAIN, 9));
-            g.setColor(TEXT_DIM);
-            drawWrapped(g, topContent, 14, 30, W - 28, 11);
+            g.setFont(new Font("Monospaced", Font.BOLD, 9));
+            g.setColor(COL_AENG);
+            g.drawString(String.format("ANG  %02d:%02d:%02d %s",
+                c.aengDispH, c.aengM, c.aengS,
+                c.aengPM ? "PM" : "AM"), x, y + dy * 2);
+        }
+
+        // Midnight sync
+        if (c.atMidnightSync && pH > y + dy * 3)
+        {
+            g.setFont(new Font("Monospaced", Font.PLAIN, 7));
+            g.setColor(COL_SYNC);
+            drawCx(g, "── MIDNIGHT SYNC ──", W / 2, y + dy * 3);
         }
     }
 
-    // ── BOTTOM PANEL ──────────────────────────────────────────────────────────
+    // ── BOTTOM — INVENTORY + EXIT ─────────────────────────────────────────────
 
-    private void renderBottomPanel(Graphics2D g, int W, int H,
-                                   int panelH, boolean isStandalone) 
+    private void renderBottom(Graphics2D g, int W, int H, int pH, boolean standalone)
     {
-        int top = H - panelH;
+        int top = H - pH;
+        fill(g, shapeBottom(W, H, pH));
 
-        // Shape: full width, bottom-flush outer corners, rounded inner (top) corners
-        GeneralPath shape = new GeneralPath();
-        shape.moveTo(0, H);
-        shape.lineTo(W, H);
-        shape.lineTo(W, top + CORNER_R);
-        shape.quadTo(W, top, W - CORNER_R, top);         // top-right inner
-        shape.lineTo(CORNER_R, top);
-        shape.quadTo(0, top, 0, top + CORNER_R);         // top-left inner
-        shape.closePath();
-
-        g.setColor(PANEL_BG);
-        g.fill(shape);
-        g.setColor(PANEL_BORDER);
-        g.setStroke(new BasicStroke(1.2f));
-        g.draw(shape);
-
-        // Content
         g.setFont(new Font("Monospaced", Font.BOLD, 9));
         g.setColor(TEXT_TITLE);
         g.drawString("INVENTORY", 14, top + 16);
 
-        // [PYTHON HOOK: bottom panel content from PANEL_UPDATE tag]
-        if (!bottomContent.isEmpty()) 
+        if (!bottomContent.isEmpty())
         {
             g.setFont(new Font("Monospaced", Font.PLAIN, 9));
             g.setColor(TEXT_DIM);
             drawWrapped(g, bottomContent, 14, top + 30, W - 28, 11);
         }
 
-        // STANDALONE EXIT BUTTON
-        if (isStandalone && panelH >= BOTTOM_HEIGHT - 10) 
+        if (standalone && pH >= BOTTOM_HEIGHT - 10)
         {
-            renderExitButton(g, W, H);
+            int bW = 80, bH = 22, bX = W - bW - 14, bY = H - bH - 10;
+            g.setColor(exitHovered ? EXIT_HOV : EXIT_NORM);
+            g.fillRoundRect(bX, bY, bW, bH, 6, 6);
+            g.setColor(new Color(255, 200, 200, 180));
+            g.setStroke(new BasicStroke(0.8f));
+            g.drawRoundRect(bX, bY, bW, bH, 6, 6);
+            g.setFont(new Font("Monospaced", Font.BOLD, 10));
+            g.setColor(Color.WHITE);
+            FontMetrics fm = g.getFontMetrics();
+            g.drawString("EXIT", bX + (bW - fm.stringWidth("EXIT")) / 2, bY + 15);
         }
     }
 
-    private void renderExitButton(Graphics2D g, int W, int H) 
+    // ── LEFT — OPTIONS ────────────────────────────────────────────────────────
+
+    private void renderLeft(Graphics2D g, int H, int pW, int topH, int botH)
     {
-        int btnW = 80;
-        int btnH = 22;
-        int btnX = W - btnW - 14;
-        int btnY = H - btnH - 10;
+        fill(g, shapeLeft(H, pW, topH, botH));
+        if (pW < 40) return;
 
-        g.setColor(exitHovered ? EXIT_HOVER : EXIT_BG);
-        g.fillRoundRect(btnX, btnY, btnW, btnH, 6, 6);
-        g.setColor(new Color(255, 200, 200, 180));
-        g.setStroke(new BasicStroke(0.8f));
-        g.drawRoundRect(btnX, btnY, btnW, btnH, 6, 6);
-
-        g.setFont(new Font("Monospaced", Font.BOLD, 10));
-        g.setColor(Color.WHITE);
-        FontMetrics fm = g.getFontMetrics();
-        String label = "EXIT";
-        g.drawString(label,
-                     btnX + (btnW - fm.stringWidth(label)) / 2,
-                     btnY + 15);
-    }
-
-    // ── LEFT PANEL ────────────────────────────────────────────────────────────
-
-    private void renderLeftPanel(Graphics2D g, int H, int panelW,
-                                  int topH, int botH) 
-    {
-        int top = topH;
-        int bot = H - botH;
-
-        // Shape: left-flush outer corners, rounded inner (right) corners
-        GeneralPath shape = new GeneralPath();
-        shape.moveTo(0, top);
-        shape.lineTo(panelW - CORNER_R, top);
-        shape.quadTo(panelW, top, panelW, top + CORNER_R);          // top-right inner
-        shape.lineTo(panelW, bot - CORNER_R);
-        shape.quadTo(panelW, bot, panelW - CORNER_R, bot);          // bottom-right inner
-        shape.lineTo(0, bot);
-        shape.closePath();
-
-        g.setColor(PANEL_BG);
-        g.fill(shape);
-        g.setColor(PANEL_BORDER);
-        g.setStroke(new BasicStroke(1.2f));
-        g.draw(shape);
-
-        // Content
-        if (panelW < 40) return;
         g.setFont(new Font("Monospaced", Font.BOLD, 9));
         g.setColor(TEXT_TITLE);
-        g.drawString("OPT", 8, top + 18);
+        g.drawString("OPT", 8, topH + 18);
 
-        // [PYTHON HOOK: left panel content from PANEL_UPDATE tag]
-        if (!leftContent.isEmpty()) 
+        if (!leftContent.isEmpty())
         {
             g.setFont(new Font("Monospaced", Font.PLAIN, 8));
             g.setColor(TEXT_DIM);
-            drawWrapped(g, leftContent, 6, top + 32, panelW - 12, 10);
+            drawWrapped(g, leftContent, 6, topH + 32, pW - 12, 10);
         }
     }
 
-    // ── RIGHT PANEL ───────────────────────────────────────────────────────────
+    // ── RIGHT — CALENDAR ──────────────────────────────────────────────────────
 
-    private void renderRightPanel(Graphics2D g, int W, int H,
-                                   int panelW, int topH, int botH) 
+    private final int[] mi0 = new int[2];
+    private final int[] mi1 = new int[2];
+
+    private void renderRight(Graphics2D g, int W, int H, int pW,
+                              int topH, int botH, WorldState world)
     {
-        int left = W - panelW;
+        int left = W - pW;
         int top  = topH;
         int bot  = H - botH;
 
-        // Shape: right-flush outer corners, rounded inner (left) corners
-        GeneralPath shape = new GeneralPath();
-        shape.moveTo(W, top);
-        shape.lineTo(left + CORNER_R, top);
-        shape.quadTo(left, top, left, top + CORNER_R);              // top-left inner
-        shape.lineTo(left, bot - CORNER_R);
-        shape.quadTo(left, bot, left + CORNER_R, bot);              // bottom-left inner
-        shape.lineTo(W, bot);
-        shape.closePath();
+        fill(g, shapeRight(W, H, pW, topH, botH));
+        if (pW < 50 || (bot - top) < 60) return;
 
-        g.setColor(PANEL_BG);
-        g.fill(shape);
-        g.setColor(PANEL_BORDER);
-        g.setStroke(new BasicStroke(1.2f));
-        g.draw(shape);
+        CelestialClock clk = world.clock;
+        if (clk == null) return;
 
-        // Content
-        if (panelW < 40) return;
-        g.setFont(new Font("Monospaced", Font.BOLD, 9));
+        int cx = left + pW / 2;
+        int y  = top + 12;
+
+        // Calendar mode header
+        g.setFont(new Font("Monospaced", Font.BOLD, 7));
+        g.setColor(calModeColor(clk.calMode));
+        drawCx(g, clk.calModeName(), cx, y);
+        y += 11;
+
+        // Month + year
+        g.setFont(new Font("Monospaced", Font.BOLD, 8));
         g.setColor(TEXT_TITLE);
-        g.drawString("KNO", left + 8, top + 18);
+        drawCx(g, clk.monthName() + " " + clk.calYear, cx, y);
+        y += 12;
 
-        // [PYTHON HOOK: right panel content from PANEL_UPDATE tag]
-        // Intended: encyclopedia entry index, discoverable theory list.
-        // Python sends entry labels via PANEL_UPDATE:right: tags.
-        if (!rightContent.isEmpty()) 
+        // Day-of-week header
+        int colW = Math.max(1, (pW - 8) / 7);
+        g.setFont(new Font("Monospaced", Font.PLAIN, 6));
+        g.setColor(TEXT_DIM);
+        for (int d = 0; d < 7; d++)
+            drawCx(g, CelestialClock.DAY_ABBR[d], left + 4 + d * colW + colW / 2, y);
+        y += 9;
+
+        // Prev month day count for overflow cells
+        int prevDays = 31;
+        if (clk.calMonth > 0)
         {
-            g.setFont(new Font("Monospaced", Font.PLAIN, 8));
-            g.setColor(TEXT_DIM);
-            drawWrapped(g, rightContent, left + 6, top + 32, panelW - 12, 10);
+            CelestialClock.getMonthInfo(clk.calYear, clk.calMonth - 1, clk.calMode, mi1);
+            prevDays = mi1[1];
         }
+
+        int rowH       = Math.max(8, Math.min(11, (bot - y - 4) / 6));
+        int totalCells = ((clk.calStartWday + clk.calDaysInMonth + 6) / 7) * 7;
+
+        for (int i = 0; i < totalCells && i < 42; i++)
+        {
+            int col   = i % 7;
+            int row   = i / 7;
+            int cellX = left + 4 + col * colW + colW / 2;
+            int cellY = y + row * rowH + rowH - 2;
+            if (cellY > bot - 2) break;
+
+            String dayStr;
+            Color  dayCol;
+
+            if (i < clk.calStartWday)
+            {
+                dayStr = String.valueOf(prevDays - clk.calStartWday + i + 1);
+                dayCol = new Color(60, 60, 80, 140);
+            }
+            else if (i >= clk.calStartWday + clk.calDaysInMonth)
+            {
+                dayStr = String.valueOf(i - (clk.calStartWday + clk.calDaysInMonth) + 1);
+                dayCol = new Color(60, 60, 80, 140);
+            }
+            else
+            {
+                int dayNum  = i - clk.calStartWday + 1;
+                boolean today = (clk.calYear  == clk.todayYear
+                              && clk.calMonth == clk.todayMonth
+                              && dayNum       == clk.todayDay);
+                dayStr = String.valueOf(dayNum);
+                if (today)
+                {
+                    g.setColor(new Color(255, 215, 0, 55));
+                    g.fillRoundRect(cellX - colW/2 + 1, cellY - rowH + 2,
+                                    colW - 2, rowH - 1, 3, 3);
+                    dayCol = new Color(255, 215, 0);
+                }
+                else dayCol = TEXT_BRIGHT;
+            }
+
+            g.setFont(new Font("Monospaced", Font.PLAIN, 6));
+            g.setColor(dayCol);
+            drawCx(g, dayStr, cellX, cellY);
+        }
+    }
+
+    private Color calModeColor(int m)
+    {
+        switch (m)
+        {
+            case CelestialClock.CAL_CELESTIAL: return COL_HYB;
+            case CelestialClock.CAL_COTSWORTH: return new Color(0, 215, 200);
+            default:                            return COL_STD;
+        }
+    }
+
+    // ── PANEL SHAPES ──────────────────────────────────────────────────────────
+
+    private void fill(Graphics2D g, GeneralPath s)
+    {
+        g.setColor(BG);     g.fill(s);
+        g.setColor(BORDER); g.setStroke(new BasicStroke(1.2f)); g.draw(s);
+    }
+
+    private GeneralPath shapeTop(int W, int pH)
+    {
+        GeneralPath s = new GeneralPath();
+        s.moveTo(0, 0); s.lineTo(W, 0);
+        s.lineTo(W, pH - CORNER_R);
+        s.quadTo(W, pH, W - CORNER_R, pH);
+        s.lineTo(CORNER_R, pH);
+        s.quadTo(0, pH, 0, pH - CORNER_R);
+        s.closePath(); return s;
+    }
+
+    private GeneralPath shapeBottom(int W, int H, int pH)
+    {
+        int top = H - pH;
+        GeneralPath s = new GeneralPath();
+        s.moveTo(0, H); s.lineTo(W, H);
+        s.lineTo(W, top + CORNER_R);
+        s.quadTo(W, top, W - CORNER_R, top);
+        s.lineTo(CORNER_R, top);
+        s.quadTo(0, top, 0, top + CORNER_R);
+        s.closePath(); return s;
+    }
+
+    private GeneralPath shapeLeft(int H, int pW, int topH, int botH)
+    {
+        int top = topH, bot = H - botH;
+        GeneralPath s = new GeneralPath();
+        s.moveTo(0, top);
+        s.lineTo(pW - CORNER_R, top);
+        s.quadTo(pW, top, pW, top + CORNER_R);
+        s.lineTo(pW, bot - CORNER_R);
+        s.quadTo(pW, bot, pW - CORNER_R, bot);
+        s.lineTo(0, bot);
+        s.closePath(); return s;
+    }
+
+    private GeneralPath shapeRight(int W, int H, int pW, int topH, int botH)
+    {
+        int left = W - pW, top = topH, bot = H - botH;
+        GeneralPath s = new GeneralPath();
+        s.moveTo(W, top);
+        s.lineTo(left + CORNER_R, top);
+        s.quadTo(left, top, left, top + CORNER_R);
+        s.lineTo(left, bot - CORNER_R);
+        s.quadTo(left, bot, left + CORNER_R, bot);
+        s.lineTo(W, bot);
+        s.closePath(); return s;
     }
 
     // ── HIT DETECTION ─────────────────────────────────────────────────────────
 
-    public void onMouseMove(int mouseX, int mouseY, int W, int H,
-                            float slideProgress) 
+    public void onMouseMove(int mx, int my, int W, int H, float slide)
     {
-        if (slideProgress < 0.9f) { exitHovered = false; return; }
-        int panelH = BOTTOM_HEIGHT;
-        int btnW = 80, btnH = 22;
-        int btnX = W - btnW - 14;
-        int btnY = H - btnH - 10;
-        exitHovered = mouseX >= btnX && mouseX <= btnX + btnW
-                   && mouseY >= btnY && mouseY <= btnY + btnH;
+        if (slide < 0.9f) { exitHovered = false; return; }
+        int bW = 80, bH = 22, bX = W - bW - 14, bY = H - bH - 10;
+        exitHovered = mx >= bX && mx <= bX + bW && my >= bY && my <= bY + bH;
     }
 
-    public boolean onMouseClick(int mouseX, int mouseY, int W, int H,
-                                float slideProgress, boolean isStandalone) 
+    public boolean onMouseClick(int mx, int my, int W, int H,
+                                float slide, boolean standalone)
     {
-        if (!isStandalone || slideProgress < 0.9f) return false;
-        int panelH = BOTTOM_HEIGHT;
-        int btnW = 80, btnH = 22;
-        int btnX = W - btnW - 14;
-        int btnY = H - btnH - 10;
-        boolean hit = mouseX >= btnX && mouseX <= btnX + btnW
-                   && mouseY >= btnY && mouseY <= btnY + btnH;
-        if (hit && standaloneExitCallback != null) 
+        if (slide < 0.9f) return false;
+
+        if (standalone)
         {
-            standaloneExitCallback.run();
-            return true;
+            int bW = 80, bH = 22, bX = W - bW - 14, bY = H - bH - 10;
+            if (mx >= bX && mx <= bX + bW && my >= bY && my <= bY + bH)
+            {
+                if (standaloneExitCallback != null) standaloneExitCallback.run();
+                return true;
+            }
         }
+
+        // Right panel header — cycle calendar mode
+        int rLeft = (int)(W - SIDE_WIDTH * slide);
+        if (mx >= rLeft && my <= 22)
+        { calendarModeTapped = true; return true; }
+
         return false;
     }
 
     // ── TEXT HELPERS ──────────────────────────────────────────────────────────
 
-    private void drawWrapped(Graphics2D g, String text, int x, int y,
-                              int maxW, int lineH) 
+    private void drawCx(Graphics2D g, String s, int cx, int y)
+    {
+        if (s == null || s.isEmpty()) return;
+        FontMetrics fm = g.getFontMetrics();
+        g.drawString(s, cx - fm.stringWidth(s) / 2, y);
+    }
+
+    private void drawWrapped(Graphics2D g, String text,
+                              int x, int y, int maxW, int lineH)
     {
         if (text == null || text.isEmpty()) return;
         FontMetrics fm = g.getFontMetrics();
         int cy = y;
-        for (String line : text.split("\n")) 
+        for (String line : text.split("\n"))
         {
-            // Simple word wrap
-            StringBuilder current = new StringBuilder();
-            for (String word : line.split(" ")) 
+            StringBuilder cur = new StringBuilder();
+            for (String word : line.split(" "))
             {
-                String test = current.length() == 0 ? word : current + " " + word;
-                if (fm.stringWidth(test) > maxW && current.length() > 0) 
-                {
-                    g.drawString(current.toString(), x, cy);
-                    cy += lineH;
-                    current = new StringBuilder(word);
-                } 
-                else 
-                {
-                    current = new StringBuilder(test);
-                }
+                String t = cur.length() == 0 ? word : cur + " " + word;
+                if (fm.stringWidth(t) > maxW && cur.length() > 0)
+                { g.drawString(cur.toString(), x, cy); cy += lineH; cur = new StringBuilder(word); }
+                else cur = new StringBuilder(t);
             }
-            if (current.length() > 0) 
-            {
-                g.drawString(current.toString(), x, cy);
-                cy += lineH;
-            }
+            if (cur.length() > 0) { g.drawString(cur.toString(), x, cy); cy += lineH; }
         }
     }
 }
