@@ -268,6 +268,14 @@ public class IceSandbox extends JPanel
     {
         scaler.applyToWorld(world);
 
+        // --- Clock Logic ---
+        world.clock.update();
+
+        if (sidePanels.calendarModeTapped) {
+            world.clock.calCycleMode();
+            sidePanels.calendarModeTapped = false;
+        }
+
         // Gravity from active planet
         WorldState.SystemPlanet planet = world.planets[world.activePlanet];
         float gravity = (planet != null) ? planet.gravity : 1.0f;
@@ -434,8 +442,8 @@ public class IceSandbox extends JPanel
         // Movement
         if (key == KeyEvent.VK_A) physics.setMoveLeft(true);
         if (key == KeyEvent.VK_D) physics.setMoveRight(true);
-        if (key == KeyEvent.VK_W) world.cameraPitchDeg = Math.max(-60f, world.cameraPitchDeg - 2f);
-        if (key == KeyEvent.VK_S) world.cameraPitchDeg = Math.min(60f, world.cameraPitchDeg + 2f);
+        if (key == KeyEvent.VK_W) physics.setMoveForward(true);
+        if (key == KeyEvent.VK_S) physics.setMoveBack(true);
 
         if (key == KeyEvent.VK_SPACE)
         {
