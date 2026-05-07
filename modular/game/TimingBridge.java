@@ -75,6 +75,9 @@ public class TimingBridge
     public TimingBridge(File gameDir) 
     {
         detectAndLoadASM(gameDir);
+        // Start hardware governor — adjusts render quality to hit target FPS.
+        // SphereRenderer reads OptimizeRender.Governor.getQualityMultiplier().
+        OptimizeRender.Governor.start(30.0); // 30 FPS default target
     }
 
     // ── ASM DETECTION ─────────────────────────────────────────────────────────

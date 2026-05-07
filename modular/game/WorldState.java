@@ -112,9 +112,9 @@ public class WorldState
     public static final int   SUBDIVISIONS       = 4;
 
     public int   scaleTier            = 0;
-
     public float worldScaleMultiplier = 1.0f;
-    public float activeSphereRadius = WorldState.BASE_DIAMETER_FT / 2f;
+    public float activeSphereRadius   = BASE_DIAMETER_FT / 2f;
+
     // LOD thresholds in world units — tunable per hardware profile
     public float lodCharacterThreshold = 6.0f;
     public float lodEntryThreshold     = 30.0f;
@@ -141,7 +141,10 @@ public class WorldState
     public float[] camPos    = {0f, 5f, -10f};
     public float[] camTarget = {0f, 0f,   0f};
     public float   camFOV    = 60.0f;
-    public float cameraPitchDeg = 0f;
+
+    // Camera look angles controlled by IceSandbox arrow keys / mouse look
+    public float   cameraYaw   = 0f;
+    public float   cameraPitch = 15f;
 
     // ── TIMING / UI ───────────────────────────────────────────────────────────
     public int     timingMode         = TimingBridge.MODE_GAMEPLAY;
@@ -180,10 +183,34 @@ public class WorldState
     public File    voidImagesDir       = null;
     public boolean voidImagesDirty     = false;
 
+
+    // ── CELESTIAL CLOCK + PHYSICS MODE ───────────────────────────────────────
+    // Updated each logic tick by IceSandbox.updateLogic() via clock.update().
+    // Governs day/night, orbital mechanics, atmosphere in non-standard modes.
+    public CelestialClock clock       = new CelestialClock();
+    public int physicsMode            = CelestialClock.PHYSICS_STANDARD;
     // ── EVENTS ────────────────────────────────────────────────────────────────
     public String       lastDiscoveryUID = null;
     public List<String> pendingEvents    = new ArrayList<>();
     public List<GameEntity> entities     = new ArrayList<>();
+
+    // ── THREAD ECONOMY (from Aengloria resource system) ──────────────────────
+    // rawNoise  → harvested by Signal Catcher mechanic (entropy input)
+    // blueThreads → Logic resource (gained via Forensic Lens decrypt)
+    // goldThreads → Love resource (gained via Forensic Lens decrypt)
+    // artifacts   → crafted items (spent in Garden Weaver)
+    public float rawNoise    = 0f;
+    public int   blueThreads = 0;
+    public int   goldThreads = 0;
+    public int   artifacts   = 0;
+
+    // ── MINIGAME NODES ────────────────────────────────────────────────────────
+    // Populated by HtmlGameScanner at game load.
+    // Each node is a location on the sphere surface where a mechanic is active.
+    // Player walks to it, presses F to interact.
+    // Mechanic runs via MiniGameEngine — no popup window, all in-viewport.
+    public java.util.List<GameNode> gameNodes  = new ArrayList<>();
+    public GameNode activeMiniGame             = null;  // currently running node
 
     // ─────────────────────────────────────────────────────────────────────────
     // INNER CLASSES
@@ -318,6 +345,42 @@ public class WorldState
             this.angleDeg = angleDeg;
             this.latitude = latitude;
             this.label    = label;
+        }
+    }
+
+    // ── GAME NODE ─────────────────────────────────────────────────────────────
+    // A mechanic discovered by HtmlGameScanner from an HTML file in the
+    // HTML folder. Placed at a deterministic position on the sphere surface.
+    // Player walks to it and presses F to activate via MiniGameEngine.
+
+    public static class GameNode
+    {
+        // Source
+        public String htmlFile;      // filename (not full path)
+        public String title;         // human-readable title parsed from HTML
+        public String mechanic;      // SIGNAL / WEAVE / DECRYPT / SANCTUARY / CLOCK
+
+        // Position on sphere surface
+        public float  angleDeg;      // longitude
+        public float  latDeg;        // latitude
+
+        // State
+        public boolean unlocked  = true;   // available to interact
+        public boolean active    = false;  // player currently in range
+        public String  statusMsg = "";     // brief status for sidebar display
+
+        // Mechanic-specific state (used by MiniGameEngine)
+        public float   progress  = 0f;    // 0-1 generic progress
+        public int     streak    = 0;     // consecutive successes
+
+        public GameNode(String htmlFile, String title, String mechanic,
+                        float angleDeg, float latDeg)
+        {
+            this.htmlFile = htmlFile;
+            this.title    = title;
+            this.mechanic = mechanic;
+            this.angleDeg = angleDeg;
+            this.latDeg   = latDeg;
         }
     }
 

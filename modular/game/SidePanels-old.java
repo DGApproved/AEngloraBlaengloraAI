@@ -11,16 +11,26 @@ package modular.game;
  *   LEFT   — Options / settings (Python-driven via PANEL_UPDATE)
  *   BOTTOM — Inventory + standalone EXIT button
  *
- * MINIGAME LIST:
- *   The right panel uses the space below the calendar grid to list minigames
- *   discovered from HTML files by HtmlGameScanner and run by MiniGameEngine.
+ * CLOCK DISPLAY:
+ *   All three modes visible simultaneously.
+ *   Hybrid second shown in [brackets] when ≥ 60 (drift territory).
+ *   Drift is intentional — two incommensurate subdivisions sharing one display.
+ *   Midnight sync indicator when all three align at 00:00:00.
+ *
+ * CALENDAR DISPLAY:
+ *   Compact monthly grid. Today highlighted gold.
+ *   Header tap cycles calendar mode. Three modes via CelestialClock.
+ *
+ * GEOMETRY:
+ *   Outer corners flush with screen edge.
+ *   Inner corners (facing game world) rounded at CORNER_R.
+ *   Game world visible behind panels.
+ *   Animated via WorldState.panelSlideProgress.
  *
  * Contributors:
  *   Derek Jason Gilhousen — panel design, three-phase clock concept,
  *                           drift mechanics, calendar systems
  *   Claude (Anthropic)    — SidePanels implementation
- *   ChatGPT (OpenAI)      — fixed calendar/minigame layout scope bug and
- *                           regenerated compile-safe minigame list area
  */
 
 import java.awt.*;
@@ -28,11 +38,13 @@ import java.awt.geom.GeneralPath;
 
 public class SidePanels
 {
+    // ── LAYOUT ────────────────────────────────────────────────────────────────
     private static final int TOP_HEIGHT    = 90;
     private static final int BOTTOM_HEIGHT = 80;
     private static final int SIDE_WIDTH    = 130;
     private static final int CORNER_R      = 18;
 
+    // ── COLORS ────────────────────────────────────────────────────────────────
     private static final Color BG          = new Color(5,   8,   18,  225);
     private static final Color BORDER      = new Color(157, 80,  187, 130);
     private static final Color TEXT_TITLE  = new Color(250, 205, 104);
@@ -46,14 +58,13 @@ public class SidePanels
     private static final Color EXIT_NORM   = new Color(239, 68,  68,  160);
     private static final Color EXIT_HOV    = new Color(239, 68,  68,  220);
 
+    // ── STATE ─────────────────────────────────────────────────────────────────
     private boolean  exitHovered        = false;
-    public  boolean  calendarModeTapped = false;
+    public  boolean  calendarModeTapped = false;  // read by IceSandbox each tick
 
     private Runnable standaloneExitCallback = null;
     private String   leftContent            = "";
     private String   bottomContent          = "";
-
-    private final int[] mi1 = new int[2];
 
     public void setStandaloneExitCallback(Runnable cb) { standaloneExitCallback = cb; }
 
@@ -62,6 +73,8 @@ public class SidePanels
         if ("left".equals(side))        leftContent   = content;
         else if ("bottom".equals(side)) bottomContent = content;
     }
+
+    // ── RENDER ────────────────────────────────────────────────────────────────
 
     public void render(Graphics2D g, WorldState world, int W, int H, boolean standalone)
     {
@@ -84,6 +97,8 @@ public class SidePanels
         if (rightW > 2) renderRight(g, W, H, rightW, topH, botH, world);
     }
 
+    // ── TOP — CELESTIAL CLOCK ─────────────────────────────────────────────────
+
     private void renderTop(Graphics2D g, int W, int pH, WorldState world)
     {
         fill(g, shapeTop(W, pH));
@@ -93,11 +108,13 @@ public class SidePanels
 
         int x = 10, y = 14, dy = 20;
 
+        // Standard
         g.setFont(new Font("Monospaced", Font.BOLD, 9));
         g.setColor(COL_STD);
         g.drawString(String.format("STD  %02d:%02d:%02d %s",
             c.stdH, c.stdM, c.stdS, c.stdPM ? "PM" : "AM"), x, y);
 
+        // Hybrid — second may be in drift territory
         if (pH > y + dy)
         {
             String base = String.format("HYB  %02d:%02d:", c.hybDispH, c.hybM);
@@ -112,8 +129,7 @@ public class SidePanels
                 g.setColor(COL_DRIFT);
                 g.drawString(String.format("[%02d]", c.hybS), sx, y + dy);
                 g.setColor(COL_HYB);
-                g.drawString(c.hybPM ? " PM" : " AM",
-                             sx + fm.stringWidth("[00]"), y + dy);
+                g.drawString(c.hybPM ? " PM" : " AM", sx + fm.stringWidth("[00]"), y + dy);
             }
             else
             {
@@ -123,6 +139,7 @@ public class SidePanels
             }
         }
 
+        // Aengloria
         if (pH > y + dy * 2)
         {
             g.setFont(new Font("Monospaced", Font.BOLD, 9));
@@ -132,6 +149,7 @@ public class SidePanels
                 c.aengPM ? "PM" : "AM"), x, y + dy * 2);
         }
 
+        // Midnight sync
         if (c.atMidnightSync && pH > y + dy * 3)
         {
             g.setFont(new Font("Monospaced", Font.PLAIN, 7));
@@ -139,6 +157,8 @@ public class SidePanels
             drawCx(g, "── MIDNIGHT SYNC ──", W / 2, y + dy * 3);
         }
     }
+
+    // ── BOTTOM — INVENTORY + EXIT ─────────────────────────────────────────────
 
     private void renderBottom(Graphics2D g, int W, int H, int pH, boolean standalone)
     {
@@ -171,6 +191,8 @@ public class SidePanels
         }
     }
 
+    // ── LEFT — OPTIONS ────────────────────────────────────────────────────────
+
     private void renderLeft(Graphics2D g, int H, int pW, int topH, int botH)
     {
         fill(g, shapeLeft(H, pW, topH, botH));
@@ -188,6 +210,11 @@ public class SidePanels
         }
     }
 
+    // ── RIGHT — CALENDAR ──────────────────────────────────────────────────────
+
+    private final int[] mi0 = new int[2];
+    private final int[] mi1 = new int[2];
+
     private void renderRight(Graphics2D g, int W, int H, int pW,
                               int topH, int botH, WorldState world)
     {
@@ -204,16 +231,19 @@ public class SidePanels
         int cx = left + pW / 2;
         int y  = top + 12;
 
+        // Calendar mode header
         g.setFont(new Font("Monospaced", Font.BOLD, 7));
         g.setColor(calModeColor(clk.calMode));
         drawCx(g, clk.calModeName(), cx, y);
         y += 11;
 
+        // Month + year
         g.setFont(new Font("Monospaced", Font.BOLD, 8));
         g.setColor(TEXT_TITLE);
         drawCx(g, clk.monthName() + " " + clk.calYear, cx, y);
         y += 12;
 
+        // Day-of-week header
         int colW = Math.max(1, (pW - 8) / 7);
         g.setFont(new Font("Monospaced", Font.PLAIN, 6));
         g.setColor(TEXT_DIM);
@@ -221,6 +251,7 @@ public class SidePanels
             drawCx(g, CelestialClock.DAY_ABBR[d], left + 4 + d * colW + colW / 2, y);
         y += 9;
 
+        // Prev month day count for overflow cells
         int prevDays = 31;
         if (clk.calMonth > 0)
         {
@@ -230,7 +261,6 @@ public class SidePanels
 
         int rowH       = Math.max(8, Math.min(11, (bot - y - 4) / 6));
         int totalCells = ((clk.calStartWday + clk.calDaysInMonth + 6) / 7) * 7;
-        int lastCalendarY = y;
 
         for (int i = 0; i < totalCells && i < 42; i++)
         {
@@ -239,8 +269,6 @@ public class SidePanels
             int cellX = left + 4 + col * colW + colW / 2;
             int cellY = y + row * rowH + rowH - 2;
             if (cellY > bot - 2) break;
-
-            lastCalendarY = cellY;
 
             String dayStr;
             Color  dayCol;
@@ -277,60 +305,50 @@ public class SidePanels
             drawCx(g, dayStr, cellX, cellY);
         }
 
-        renderMiniGameList(g, world, left, W, cx, lastCalendarY + 12, bot);
-    }
-
-    private void renderMiniGameList(Graphics2D g, WorldState world,
-                                    int left, int W, int cx, int startY, int bot)
-    {
-        if (world.gameNodes == null || world.gameNodes.isEmpty()) return;
-
-        int my = startY;
-        if (my >= bot - 10) return;
-
-        g.setColor(new Color(157, 80, 187, 60));
-        g.setStroke(new BasicStroke(0.5f));
-        g.drawLine(left + 4, my, W - 4, my);
-        my += 8;
-
-        g.setFont(new Font("Monospaced", Font.BOLD, 6));
-        g.setColor(new Color(157, 80, 187, 200));
-        drawCx(g, "MINIGAMES", cx, my);
-        my += 9;
-
-        for (WorldState.GameNode node : world.gameNodes)
+        // ── MINIGAME LIST (below calendar) ────────────────────────────────────
+        // Discovered from HTML folder by HtmlGameScanner.
+        // Player walks to a node on the planet surface and presses F to activate.
+        if (world.gameNodes != null && !world.gameNodes.isEmpty())
         {
-            if (my >= bot - 4) break;
-
-            boolean isActive = (world.activeMiniGame == node);
-            Color nodeCol = node.unlocked
-                ? (isActive ? new Color(80, 220, 120)
-                            : node.active ? new Color(250, 205, 104)
-                                          : TEXT_BRIGHT)
-                : new Color(80, 80, 100, 150);
-
-            g.setFont(new Font("Monospaced", Font.PLAIN, 6));
-            g.setColor(nodeCol);
-
-            String prefix = isActive ? "▶ " : node.active ? "◉ " : "○ ";
-            String label  = prefix + mechanicShort(node.mechanic);
-            drawCx(g, label, cx, my);
-            my += 8;
-
-            if ((isActive || !node.unlocked) && node.statusMsg != null && !node.statusMsg.isEmpty())
+            int my = cellY + 12; // continue below last calendar row
+            if (my < bot - 10)
             {
-                if (my >= bot - 4) break;
-                g.setFont(new Font("Monospaced", Font.PLAIN, 5));
-                g.setColor(node.unlocked ? TEXT_DIM : new Color(90, 90, 120, 150));
-                drawCx(g, trimTo(node.statusMsg, 18), cx, my);
-                my += 7;
+                // Separator
+                g.setColor(new Color(157, 80, 187, 60));
+                g.setStroke(new BasicStroke(0.5f));
+                g.drawLine(left + 4, my, W - 4, my);
+                my += 8;
+
+                g.setFont(new Font("Monospaced", Font.BOLD, 6));
+                g.setColor(new Color(157, 80, 187, 200));
+                drawCx(g, "MINIGAMES", cx, my);
+                my += 9;
+
+                for (WorldState.GameNode node : world.gameNodes)
+                {
+                    if (my >= bot - 4) break;
+
+                    // Active node glows
+                    boolean isActive = (world.activeMiniGame == node);
+                    Color nodeCol = node.unlocked
+                        ? (isActive ? new Color(80, 220, 120)
+                                    : node.active ? new Color(250, 205, 104)
+                                                  : TEXT_BRIGHT)
+                        : new Color(80, 80, 100, 150);
+
+                    g.setFont(new Font("Monospaced", Font.PLAIN, 6));
+                    g.setColor(nodeCol);
+                    String prefix = isActive ? "▶ " : node.active ? "◉ " : "○ ";
+                    String label  = prefix + mechanicShort(node.mechanic);
+                    drawCx(g, label, cx, my);
+                    my += 8;
+                }
             }
         }
     }
 
     private String mechanicShort(String m)
     {
-        if (m == null) return "UNKNOWN";
         switch (m)
         {
             case "SIGNAL":    return "SIGNAL";
@@ -340,13 +358,6 @@ public class SidePanels
             case "CLOCK":     return "HARMONY";
             default:           return m.length() > 7 ? m.substring(0,7) : m;
         }
-    }
-
-    private String trimTo(String s, int max)
-    {
-        if (s == null) return "";
-        if (s.length() <= max) return s;
-        return s.substring(0, Math.max(0, max - 1)) + "…";
     }
 
     private Color calModeColor(int m)
@@ -359,13 +370,12 @@ public class SidePanels
         }
     }
 
+    // ── PANEL SHAPES ──────────────────────────────────────────────────────────
+
     private void fill(Graphics2D g, GeneralPath s)
     {
-        g.setColor(BG);
-        g.fill(s);
-        g.setColor(BORDER);
-        g.setStroke(new BasicStroke(1.2f));
-        g.draw(s);
+        g.setColor(BG);     g.fill(s);
+        g.setColor(BORDER); g.setStroke(new BasicStroke(1.2f)); g.draw(s);
     }
 
     private GeneralPath shapeTop(int W, int pH)
@@ -417,13 +427,11 @@ public class SidePanels
         s.closePath(); return s;
     }
 
+    // ── HIT DETECTION ─────────────────────────────────────────────────────────
+
     public void onMouseMove(int mx, int my, int W, int H, float slide)
     {
-        if (slide < 0.9f)
-        {
-            exitHovered = false;
-            return;
-        }
+        if (slide < 0.9f) { exitHovered = false; return; }
         int bW = 80, bH = 22, bX = W - bW - 14, bY = H - bH - 10;
         exitHovered = mx >= bX && mx <= bX + bW && my >= bY && my <= bY + bH;
     }
@@ -443,15 +451,15 @@ public class SidePanels
             }
         }
 
+        // Right panel header — cycle calendar mode
         int rLeft = (int)(W - SIDE_WIDTH * slide);
         if (mx >= rLeft && my <= 22)
-        {
-            calendarModeTapped = true;
-            return true;
-        }
+        { calendarModeTapped = true; return true; }
 
         return false;
     }
+
+    // ── TEXT HELPERS ──────────────────────────────────────────────────────────
 
     private void drawCx(Graphics2D g, String s, int cx, int y)
     {
@@ -473,18 +481,10 @@ public class SidePanels
             {
                 String t = cur.length() == 0 ? word : cur + " " + word;
                 if (fm.stringWidth(t) > maxW && cur.length() > 0)
-                {
-                    g.drawString(cur.toString(), x, cy);
-                    cy += lineH;
-                    cur = new StringBuilder(word);
-                }
+                { g.drawString(cur.toString(), x, cy); cy += lineH; cur = new StringBuilder(word); }
                 else cur = new StringBuilder(t);
             }
-            if (cur.length() > 0)
-            {
-                g.drawString(cur.toString(), x, cy);
-                cy += lineH;
-            }
+            if (cur.length() > 0) { g.drawString(cur.toString(), x, cy); cy += lineH; }
         }
     }
 }

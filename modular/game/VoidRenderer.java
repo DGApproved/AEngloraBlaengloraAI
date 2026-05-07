@@ -114,6 +114,9 @@ public class VoidRenderer
         // 4. Named star bodies from assets/ and system/ folders
         renderNamedStars(g, world, W, H);
 
+        //4.5 Render the other active nodes/planets in the skybox
+        renderOtherPlanets(g, world, W, H);
+
         // 5. Aurora (GPU utilization driven)
         float auroraIntensity = Math.max(world.gpuUtil / 100f,
                                           world.weatherIntensity / 200f);
@@ -178,6 +181,101 @@ public class VoidRenderer
             g.setColor(base);
             g.fillOval(sx - radius, sy - radius, radius*2, radius*2);
         }
+    }
+
+    // ── ACTIVE PLANET NODES ───────────────────────────────────────────────────
+
+    private void renderOtherPlanets(Graphics2D g, WorldState world, int W, int H) 
+    {
+        // 1. Calculate camera basis vectors
+        float[] cam = world.camPos;
+        float[] tgt = world.camTarget;
+        
+        // Forward vector
+        float fx = tgt[0] - cam[0];
+        float fy = tgt[1] - cam[1];
+        float fz = tgt[2] - cam[2];
+        float flen = (float) Math.sqrt(fx*fx + fy*fy + fz*fz);
+        if (flen < 0.0001f) return;
+        fx /= flen; fy /= flen; fz /= flen;
+
+        // Right vector (cross Forward with global Up [0,1,0])
+        float rx = fy * 0f - fz * 1f;
+        float ry = fz * 0f - fx * 0f;
+        float rz = fx * 1f - fy * 0f;
+        float rlen = (float) Math.sqrt(rx*rx + ry*ry + rz*rz);
+        if (rlen < 0.0001f) { rx = 1f; ry = 0f; rz = 0f; } // fallback
+        else { rx /= rlen; ry /= rlen; rz /= rlen; }
+
+        // True Up vector (cross Right with Forward)
+        float ux = ry * fz - rz * fy;
+        float uy = rz * fx - rx * fz;
+        float uz = rx * fy - ry * fx;
+
+        float aspect = (float) W / H;
+        float tanFOV = (float) Math.tan(Math.toRadians(world.camFOV * 0.5));
+
+        for (int i = 1; i <= 12; i++) 
+        {
+            if (i == world.activePlanet) continue; // Skip current planet
+            if (i == WorldState.FN_ASTEROID_BELT) continue; // Debris field, no core body
+            
+            float[] targetPos = planetWorldPos(world, i);
+            
+            // Vector from camera to target planet
+            float dx = targetPos[0] - cam[0];
+            float dy = targetPos[1] - cam[1];
+            float dz = targetPos[2] - cam[2];
+
+            // Project onto camera's Forward vector (Depth)
+            float depth = dx * fx + dy * fy + dz * fz;
+            
+            // If planet is behind the camera, clip it
+            if (depth < 0.1f) continue;
+
+            // Project onto camera's Right and Up vectors
+            float rightOffset = dx * rx + dy * ry + dz * rz;
+            float upOffset    = dx * ux + dy * uy + dz * uz;
+
+            // Perspective division
+            float screenX = rightOffset / (depth * tanFOV * aspect);
+            float screenY = -upOffset   / (depth * tanFOV); // Invert Y for 2D screen
+
+            // Map to panel pixel coordinates
+            int sx = (int) ((screenX * 0.5f + 0.5f) * W);
+            int sy = (int) ((screenY * 0.5f + 0.5f) * H);
+            
+            // Apparent radius based on distance and body type
+            float baseRadius = (i == WorldState.FN_SUN) ? 120f : 40f;
+            int radius = Math.max(2, (int)((baseRadius / depth) * H * 0.5f)); 
+
+            // Cull if off screen entirely (with a small margin)
+            if (sx < -radius || sx > W + radius || sy < -radius || sy > H + radius) continue;
+
+            // Draw the celestial body
+            if (i == WorldState.FN_SUN) {
+                // Sun glow
+                g.setColor(new Color(255, 200, 100, 80));
+                g.fillOval(sx - radius*2, sy - radius*2, radius*4, radius*4);
+                g.setColor(new Color(255, 240, 200, 240));
+                g.fillOval(sx - radius, sy - radius, radius*2, radius*2);
+            } else {
+                // Standard planet
+                g.setColor(new Color(157, 80, 187, 220)); 
+                g.fillOval(sx - radius, sy - radius, radius*2, radius*2);
+            }
+        }
+    }
+
+    private float[] planetWorldPos(WorldState world, int fnNode) 
+    {
+        float r   = WorldState.orbitalRadius(fnNode);
+        float ang = (float) Math.toRadians(world.orbitAngles[fnNode]);
+        return new float[]{
+            r * (float) Math.cos(ang),
+            0f, // Orbital inclination is flat for V1
+            r * (float) Math.sin(ang)
+        };
     }
 
     // ── C/ASM IMAGE LAYERS ────────────────────────────────────────────────────

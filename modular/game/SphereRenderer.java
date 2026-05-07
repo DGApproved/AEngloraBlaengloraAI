@@ -86,7 +86,7 @@ public class SphereRenderer
 
         if (renderBuffer == null || bufW != bW || bufH != bH)
         {
-            renderBuffer = new BufferedImage(bW, bH, BufferedImage.TYPE_INT_ARGB);
+            renderBuffer = new BufferedImage(bW, bH, BufferedImage.TYPE_INT_RGB);
             pixels = ((DataBufferInt) renderBuffer.getRaster()
                                                   .getDataBuffer()).getData();
             bufW = bW;
@@ -115,11 +115,30 @@ public class SphereRenderer
         float aspect = (float) bW / bH;
         float tanFOV = (float) Math.tan(Math.toRadians(world.camFOV * 0.5));
 
+        // ── SPHERE CULLING ────────────────────────────────────────────────────
+        // Cull terrain spheres to visible set before the pixel loop.
+        WorldState.SystemPlanet activePlanet2 = world.planets[world.activePlanet];
+        float pcx = 0f, pcy = 0f, pcz = 0f;
+        if (activePlanet2 != null)
+        {
+            float[] pp = planetWorldPos(world, world.activePlanet);
+            pcx = pp[0]; pcy = pp[1]; pcz = pp[2];
+        }
+        int activeCount = 0;
+        if (activePlanet2 != null && activePlanet2.terrain != null)
+        {
+            activeCount = OptimizeRender.SphereList.cull(
+                activePlanet2.terrain, pcx, pcy, pcz,
+                cam, fwd, world.sunPosition);
+        }
+
         // ── PIXEL LOOP ────────────────────────────────────────────────────────
         for (int py = 0; py < bH; py++)
         {
             for (int px = 0; px < bW; px++)
             {
+                // Temporal reprojection: skip pixels not in this frame's budget
+                if (!OptimizeRender.Temporal.shouldRender(px, py)) continue;
                 // NDC coordinates (-1 to +1)
                 float ndcX = (2f * px / bW - 1f) * aspect * tanFOV;
                 float ndcY = (1f - 2f * py / bH) * tanFOV;
@@ -180,7 +199,7 @@ public class SphereRenderer
         }
 
         // Miss — sky/void color
-        return 0x00000000;
+        return skyColor(rdx, rdy, rdz, world);
     }
 
     // ── SCENE SDF ─────────────────────────────────────────────────────────────
@@ -294,32 +313,50 @@ public class SphereRenderer
     private int shade(float px, float py, float pz,
                       int materialType, WorldState world)
     {
-        float[] n   = normal(px, py, pz, world);
-        float   ndl = Math.max(0f, n[0]*lightX + n[1]*lightY + n[2]*lightZ);
-        float   amb = 0.15f;
-        float   lit = amb + (1f - amb) * ndl;
+        float[] n = normal(px, py, pz, world);
 
-        int[] base = materialColor(materialType);
-        int r = Math.min(255, (int)(base[0] * lit));
-        int g = Math.min(255, (int)(base[1] * lit));
-        int b = Math.min(255, (int)(base[2] * lit));
-        return (r << 16) | (g << 8) | b;
+        // Camera direction toward surface point
+        float[] cam = world.camPos;
+        float vx = cam[0] - px, vy = cam[1] - py, vz = cam[2] - pz;
+        float vLen = (float) Math.sqrt(vx*vx + vy*vy + vz*vz);
+        if (vLen > 0.001f) { vx /= vLen; vy /= vLen; vz /= vLen; }
+
+        // Use PBR for near surfaces, Lambert for distant (LOD)
+        float dist = vLen;
+        if (dist < world.lodCharacterThreshold)
+        {
+            // Full PBR — Cook-Torrance BRDF
+            boolean moving = world.isJumping ||
+                             (Math.abs(world.verticalVelocity) > 0.01f);
+            int shadowRays = OptimizeRender.Governor.getSoftShadowRays(moving);
+            // Single shadow ray for now; multi-ray soft shadows future work
+            double shadow = 1.0; // shadow ray handled by march occlusion
+            return OptimizeRender.PBR.shade(
+                materialType,
+                n[0], n[1], n[2],
+                vx, vy, vz,
+                lightX, lightY, lightZ,
+                1.5, shadow);
+        }
+        else
+        {
+            // Lambert for distant geometry — cheaper
+            return OptimizeRender.PBR.shadeLambert(
+                materialType, n[0], n[1], n[2],
+                lightX, lightY, lightZ, 1.0);
+        }
     }
 
+    // materialColor() replaced by OptimizeRender.Materials arrays.
+    // Left as a compatibility shim for any call sites not yet updated.
     private int[] materialColor(int mat)
     {
-        switch (mat)
-        {
-            case WorldState.MAT_DIRT:          return new int[]{139, 90,  43};
-            case WorldState.MAT_SOIL:          return new int[]{160, 120, 70};
-            case WorldState.MAT_SEDIMENT:      return new int[]{110, 100, 85};
-            case WorldState.MAT_STONE:         return new int[]{130, 135, 140};
-            case WorldState.MAT_ORE:           return new int[]{80,  60, 180};
-            case WorldState.MAT_CONVERTED_ORE: return new int[]{200, 155, 40};
-            case WorldState.MAT_CRAFTED:       return new int[]{40,  220, 210};
-            case WorldState.MAT_BEDROCK:       return new int[]{30,  25,  35};
-            default:                           return new int[]{80,  80,  80};
-        }
+        int id = (mat >= 0 && mat < OptimizeRender.Materials.SLOTS) ? mat : 0;
+        return new int[]{
+            OptimizeRender.Materials.COLOR_R[id],
+            OptimizeRender.Materials.COLOR_G[id],
+            OptimizeRender.Materials.COLOR_B[id]
+        };
     }
 
     private int skyColor(float rdx, float rdy, float rdz, WorldState world)
@@ -438,9 +475,9 @@ public class SphereRenderer
         float r   = WorldState.orbitalRadius(fnNode);
         float ang = (float) Math.toRadians(world.orbitAngles[fnNode]);
         return new float[]{
-            r * (float) Math.cos(ang),
+            r * OptimizeRender.FastMath.cosf(ang),
             0f,
-            r * (float) Math.sin(ang)
+            r * OptimizeRender.FastMath.sinf(ang)
         };
     }
 }
