@@ -127,6 +127,35 @@ public class ChatHistory
         state.chatHistory = this;
     }
 
+    public void loadLogFile(File logFile) {
+        if (logFile == null || !logFile.exists()) {
+            appendToChat("[System] Log file not found or empty: " + (logFile != null ? logFile.getName() : "null"));
+            return;
+        }
+
+        // Read the file off the main thread to prevent UI freezing
+        new Thread(() -> {
+            try {
+                // Read the entire file safely into memory
+                String content = Files.readString(logFile.toPath());
+
+                // Transition the UI on the Event Dispatch Thread
+                SwingUtilities.invokeLater(() -> {
+                    // Safely clear the visual canvas (this does not affect the file)
+                    chatHistory.setText(""); 
+                
+                    // Inject the newly read content
+                    appendHtml(content);
+                });
+
+            } catch (Exception e) {
+                SwingUtilities.invokeLater(() -> 
+                    appendToChat("[System Error] Could not read log file: " + e.getMessage())
+                );
+            }
+        }).start();
+    }
+
     public JScrollPane getScrollPane() 
     {
         return scrollPane;
