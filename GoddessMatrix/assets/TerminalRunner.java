@@ -14,6 +14,7 @@ package assets;
  * Design:
  * - no dependency on modular/*
  * - minimal assumptions about environment
+ * - Cross-Platform Bridge: dynamically translates Linux commands and routes scripts
  */
 
 import system.MatrixState;
@@ -39,7 +40,11 @@ public class TerminalRunner {
             String[] cmd;
 
             if (state.isWindows) {
+                // 'start cmd.exe' physically opens a new visible command prompt window
                 cmd = new String[]{"cmd.exe", "/c", "start", "cmd.exe"};
+            } else if (state.isMac) {
+            	// macOS native visible terminal
+            	cmd = new String[] {"open", "-a", "Terminal", dir.getAbsolutePath()};
             } else {
                 // Linux / Mac fallback
                 cmd = new String[]{
@@ -74,12 +79,15 @@ public class TerminalRunner {
             ProcessBuilder pb;
 
             if (state.isWindows) {
-                pb = new ProcessBuilder("cmd.exe", "/c", command);
+                String translatedCommand = translateCommandForWindows(command);
+                pb = new ProcessBuilder("cmd.exe", "/c", translatedCommand);
             } else {
                 pb = new ProcessBuilder("bash", "-c", command);
             }
 
             pb.directory(state.currentWorkingDirectory);
+            // Redirecting error stream ensures hidden failures are caught by your loggers
+            pb.redirectErrorStream(true); 
             pb.start();
 
             setStatus("SYS_EXEC: CMD_SENT");
@@ -90,19 +98,21 @@ public class TerminalRunner {
     }
 
     // ─────────────────────────────────────────────
-    // SCRIPT MODE EXECUTION
+    // SCRIPT MODE EXECUTION (Inline / Direct)
     // ─────────────────────────────────────────────
     public void executeDirectScript(String command) {
         try {
             ProcessBuilder pb;
 
             if (state.isWindows) {
-                pb = new ProcessBuilder("cmd.exe", "/c", command);
+                String translatedCommand = translateCommandForWindows(command);
+                pb = new ProcessBuilder("cmd.exe", "/c", translatedCommand);
             } else {
-                pb = new ProcessBuilder("bash", command);
+                pb = new ProcessBuilder("bash", "-c", command); // Added -c to properly execute string commands in bash
             }
 
             pb.directory(state.currentWorkingDirectory);
+            pb.redirectErrorStream(true);
             pb.start();
 
             setStatus("SYS_SCRIPT: EXECUTED");
@@ -131,12 +141,24 @@ public class TerminalRunner {
             ProcessBuilder pb;
 
             if (state.isWindows) {
-                pb = new ProcessBuilder("cmd.exe", "/c", scriptFile.getAbsolutePath());
+                // Smart Script Routing for Windows 11
+                String path = scriptFile.getAbsolutePath();
+                if (scriptName.endsWith(".py")) {
+                    pb = new ProcessBuilder("python", path);
+                } else if (scriptName.endsWith(".sh")) {
+                    // Leverages Windows 11 WSL or Git Bash alias if available
+                    pb = new ProcessBuilder("bash", path);
+                } else {
+                    // Default fallback for .bat or general executables
+                    pb = new ProcessBuilder("cmd.exe", "/c", path);
+                }
             } else {
+                // Linux native execution
                 pb = new ProcessBuilder("bash", scriptFile.getAbsolutePath());
             }
 
             pb.directory(scriptDir);
+            pb.redirectErrorStream(true);
             pb.start();
 
             setStatus("SYS_SCRIPT: LAUNCHED");
@@ -144,6 +166,33 @@ public class TerminalRunner {
         } catch (Exception e) {
             setStatus("SYS_SCRIPT: FAIL");
         }
+    }
+
+    // ─────────────────────────────────────────────
+    // WINDOWS COMMAND TRANSLATION LAYER
+    // ─────────────────────────────────────────────
+    private String translateCommandForWindows(String command) {
+        String trimmed = command.trim();
+        
+        // Basic Linux -> DOS translation mapping
+        if (trimmed.equals("ls") || trimmed.startsWith("ls ")) {
+            return trimmed.replaceFirst("^ls", "dir");
+        } else if (trimmed.equals("pwd")) {
+            return "cd"; // typing 'cd' without args in cmd prints the working directory
+        } else if (trimmed.equals("clear")) {
+            return "cls";
+        } else if (trimmed.startsWith("rm -rf ")) {
+            return trimmed.replaceFirst("^rm -rf ", "rmdir /s /q ");
+        } else if (trimmed.startsWith("rm ")) {
+            return trimmed.replaceFirst("^rm ", "del ");
+        } else if (trimmed.startsWith("cp ")) {
+            return trimmed.replaceFirst("^cp ", "copy ");
+        } else if (trimmed.startsWith("mv ")) {
+            return trimmed.replaceFirst("^mv ", "move ");
+        }
+        
+        // If no translation rule matches, pass it through raw
+        return command;
     }
 
     // ─────────────────────────────────────────────

@@ -126,6 +126,39 @@ public class ChatHistory
         state.typingBuffer = typingBuffer;
         state.chatHistory = this;
     }
+    
+    /**
+     * Safely transitions the rich text view to display the contents of a specific log file.
+     * The original file data remains safely stored on the disk.
+     */
+    public void loadLogFile(File logFile) {
+        if (logFile == null || !logFile.exists()) {
+            appendToChat("[System] Log file not found or empty: " + (logFile != null ? logFile.getName() : "null"));
+            return;
+        }
+
+        // Read the file off the main thread to prevent UI freezing
+        new Thread(() -> {
+            try {
+                // Read the entire file safely into memory
+                String content = Files.readString(logFile.toPath());
+
+                // Transition the UI on the Event Dispatch Thread
+                SwingUtilities.invokeLater(() -> {
+                    // Safely clear the visual canvas (this does not affect the file)
+                    chatPane.setText(""); 
+                    
+                    // Inject the newly read content
+                    appendToChat(content);
+                });
+
+            } catch (Exception e) {
+                SwingUtilities.invokeLater(() -> 
+                    appendToChat("[System Error] Could not read log file: " + e.getMessage())
+                );
+            }
+        }).start();
+    }    
 
     public JScrollPane getScrollPane() 
     {
