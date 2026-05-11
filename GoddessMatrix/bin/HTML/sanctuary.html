@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sanctuary of Equilibrium v1.0</title>
+    <style>
+        body {
+            background-color: #0a0a12; /* Deep Space */
+            color: #e0e0e0;
+            font-family: 'Courier New', Courier, monospace; /* Retro Terminal */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        #game-container {
+            position: relative;
+            width: 800px;
+            height: 600px;
+            border: 2px solid #4a4a5e;
+            background: linear-gradient(to bottom, #111, #222);
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.1);
+        }
+
+        /* The Planets */
+        .planet {
+            position: absolute;
+            border-radius: 50%;
+            transition: all 0.5s ease;
+        }
+        #planet-conscience { /* Left: The Goddess/Ideal */
+            width: 150px;
+            height: 150px;
+            top: 50px;
+            left: 50px;
+            background: radial-gradient(circle at 30% 30%, #a0c4ff, #4a90e2);
+            box-shadow: 0 0 15px #4a90e2;
+            z-index: 1;
+        }
+        #planet-perception { /* Right: The Variable/Reality */
+            width: 120px;
+            height: 120px;
+            top: 80px;
+            right: 50px;
+            background: radial-gradient(circle at 30% 30%, #ffadad, #e25555);
+            box-shadow: 0 0 15px #e25555;
+            z-index: 1;
+        }
+
+        /* The Floating City (Sanctuary) */
+        #city {
+            position: absolute;
+            bottom: 150px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 300px;
+            height: 100px;
+            background: #2a2a35;
+            border-top: 4px solid #00ffcc; /* Logic Line */
+            display: flex;
+            justify-content: center;
+            align-items: flex-end;
+        }
+        .spire {
+            width: 20px;
+            background: #5a5a6e;
+            margin: 0 5px;
+            border-top-left-radius: 5px;
+            border-top-right-radius: 5px;
+        }
+
+        /* UI Elements */
+        #ui-panel {
+            position: absolute;
+            bottom: 20px;
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+        }
+
+        button {
+            padding: 15px 30px;
+            font-size: 16px;
+            font-family: inherit;
+            font-weight: bold;
+            cursor: pointer;
+            border: none;
+            transition: transform 0.1s;
+        }
+        button:active { transform: scale(0.95); }
+
+        #btn-hammer {
+            background: #444;
+            color: #fff;
+            border-bottom: 4px solid #222;
+        }
+        #btn-hammer:hover { background: #555; }
+
+        #btn-headdress {
+            background: #00ffcc;
+            color: #000;
+            border-bottom: 4px solid #00cc99;
+        }
+        #btn-headdress:hover { background: #33ffdd; }
+
+        /* Stats Bars */
+        .stat-bar-container {
+            position: absolute;
+            top: 20px;
+            width: 200px;
+            background: #333;
+            border: 1px solid #555;
+            padding: 2px;
+        }
+        .stat-bar-fill {
+            height: 15px;
+            transition: width 0.2s;
+        }
+
+        #entropy-container { left: 50%; transform: translateX(-50%); }
+        #entropy-fill { background: #ff4444; width: 0%; }
+        
+        #insight-container { right: 20px; width: 150px; }
+        #insight-fill { background: #00ffcc; width: 0%; }
+
+        #status-msg {
+            position: absolute;
+            top: 50%;
+            width: 100%;
+            text-align: center;
+            font-size: 24px;
+            text-shadow: 0 2px 4px black;
+            pointer-events: none;
+        }
+
+        /* Particle Effects (Simple CSS) */
+        .particle {
+            position: absolute;
+            width: 4px;
+            height: 4px;
+            background: #fff;
+            pointer-events: none;
+            animation: fall 2s linear forwards;
+        }
+        @keyframes fall { to { transform: translateY(100px); opacity: 0; } }
+
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <div id="planet-conscience" title="Planet of the Goddess (Conscience)"></div>
+        <div id="planet-perception" title="The Other Planet (Variable)"></div>
+
+        <div class="stat-bar-container" id="entropy-container">
+            <div style="text-align: center; font-size: 12px; color: #aaa;">ENTROPY (CHAOS)</div>
+            <div class="stat-bar-fill" id="entropy-fill"></div>
+        </div>
+
+        <div class="stat-bar-container" id="insight-container" style="top: 50px; right: 20px;">
+            <div style="text-align: center; font-size: 12px; color: #aaa;">INSIGHT (SCORE)</div>
+            <div class="stat-bar-fill" id="insight-fill"></div>
+        </div>
+
+        <div id="city">
+            <div class="spire" style="height: 40px;"></div>
+            <div class="spire" style="height: 70px;"></div>
+            <div class="spire" style="height: 50px;"></div>
+            <div class="spire" style="height: 80px;"></div>
+            <div class="spire" style="height: 30px;"></div>
+        </div>
+
+        <div id="status-msg"></div>
+
+        <div id="ui-panel">
+            <button id="btn-hammer" onclick="useHammer()">USE THE HAMMER<br><span style="font-size:10px">(Reset Chaos / Risk Strain)</span></button>
+            <button id="btn-headdress" onclick="useHeaddress()">WEAR HEADDRESS<br><span style="font-size:10px">(Gain Insight / Slight Risk)</span></button>
+        </div>
+    </div>
+
+    <script>
+        // --- GAME LOGIC (The Conscience) ---
+
+        // State Variables
+        let entropy = 0;      // Chaos level (0-100)
+        let insight = 0;      // Score/Progress (0-100)
+        let strain = 0;       // Structural damage from overuse of Hammer
+        let gameActive = true;
+        let loopSpeed = 100;  // Milliseconds per tick
+
+        // DOM Elements
+        const entropyBar = document.getElementById('entropy-fill');
+        const insightBar = document.getElementById('insight-fill');
+        const statusMsg = document.getElementById('status-msg');
+        const city = document.getElementById('city');
+        const planetP = document.getElementById('planet-perception');
+
+        // The Heartbeat (Game Loop)
+        const gameLoop = setInterval(() => {
+            if (!gameActive) return;
+
+            // Natural Entropy Rise (The World is Chaotic)
+            entropy += 0.2; 
+            
+            // Visual Updates
+            updateUI();
+            checkState();
+            
+        }, loopSpeed);
+
+        // Action: The Hammer (Force/Reset)
+        function useHammer() {
+            if (!gameActive) return;
+            
+            // Effect: Massively reduces Entropy, but adds "Strain"
+            entropy = Math.max(0, entropy - 25);
+            strain += 5; 
+            
+            // Visual Feedback
+            shakeScreen();
+            spawnParticles(10, '#888'); // Dust
+            statusMsg.textContent = "STRIKE!";
+            setTimeout(() => statusMsg.textContent = "", 500);
+        }
+
+        // Action: The Headdress (Diplomacy/Logic)
+        function useHeaddress() {
+            if (!gameActive) return;
+
+            // Effect: Reduces Entropy slightly, Gains Insight
+            entropy = Math.max(0, entropy - 5);
+            insight += 2;
+
+            // Visual Feedback
+            planetP.style.transform = `scale(${1 + (insight/200)})`; // Planet grows with understanding
+            spawnParticles(5, '#00ffcc'); // Logic Sparks
+            statusMsg.textContent = "OBSERVING...";
+            statusMsg.style.color = "#00ffcc";
+            setTimeout(() => {
+                statusMsg.textContent = "";
+                statusMsg.style.color = "#fff";
+            }, 500);
+        }
+
+        // State Checker
+        function checkState() {
+            // Victory Condition
+            if (insight >= 100) {
+                gameOver("SANCTUARY ESTABLISHED. THE REALM IS STABLE.");
+            }
+
+            // Fail Condition: Entropy (Chaos)
+            if (entropy >= 100) {
+                gameOver("SYSTEM COLLAPSE. ENTROPY TOO HIGH.");
+            }
+
+            // Fail Condition: Strain (Rigidity)
+            if (strain >= 50) {
+                // If you use the hammer too much, the city breaks
+                city.style.borderTop = "4px solid red";
+            }
+            if (strain >= 100) {
+                gameOver("STRUCTURAL FAILURE. TOO MUCH FORCE USED.");
+            }
+        }
+
+        function updateUI() {
+            entropyBar.style.width = entropy + "%";
+            insightBar.style.width = insight + "%";
+            
+            // Color shift based on danger
+            if (entropy > 75) entropyBar.style.backgroundColor = "#ff0000";
+            else entropyBar.style.backgroundColor = "#ff4444";
+        }
+
+        function shakeScreen() {
+            const container = document.getElementById('game-container');
+            container.style.transform = "translate(2px, 2px)";
+            setTimeout(() => container.style.transform = "translate(-2px, -2px)", 50);
+            setTimeout(() => container.style.transform = "translate(0, 0)", 100);
+        }
+
+        function spawnParticles(count, color) {
+            for (let i=0; i<count; i++) {
+                let p = document.createElement('div');
+                p.className = 'particle';
+                p.style.backgroundColor = color;
+                p.style.left = (city.offsetLeft + Math.random()*200 - 100) + "px";
+                p.style.top = (city.offsetTop) + "px";
+                document.getElementById('game-container').appendChild(p);
+                setTimeout(() => p.remove(), 2000);
+            }
+        }
+
+        function gameOver(message) {
+            gameActive = false;
+            clearInterval(gameLoop);
+            statusMsg.textContent = message;
+            statusMsg.style.opacity = 1;
+            
+            if (message.includes("COLLAPSE") || message.includes("FAILURE")) {
+                statusMsg.style.color = "red";
+            } else {
+                statusMsg.style.color = "#00ffcc";
+            }
+        }
+    </script>
+</body>
+</html>
+

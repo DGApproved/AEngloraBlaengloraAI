@@ -1,0 +1,22 @@
+# image.xtx — Mode B visual directive file
+# This file belongs to the AI. Modify and extend freely.
+# Java reads known directives; unknown ones are stored for future builds.
+
+BODY_COLOR=#9D50BB
+SINE_COLOR=#FACD68
+BACKGROUND_COLOR=#0A0A0C
+TEXT_COLOR=#94A3B8
+WALK_SPEED=2
+AVATAR_SCALE=1.0
+FEATURE=sine_box
+FEATURE=status_text
+FEATURE=activity_dot
+
+# Action-to-pose mapping — AI may add new entries
+ACTION_IDLE=stand
+ACTION_PROCESSING=walk
+ACTION_READING=lean_forward
+ACTION_SHUTDOWN=sit
+ACTION_CHAT=speak
+ACTION_THINKING=hand_on_chin
+ACTION_THINK=hand_on_chin

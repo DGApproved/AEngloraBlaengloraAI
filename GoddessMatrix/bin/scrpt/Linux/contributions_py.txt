@@ -1,0 +1,237 @@
+"""
+════════════════════════════════════════════════════════════════════
+GODDESS API — PYTHON RUNTIME (GoddessAPI.py)
+
+Core Architecture, Vision, Project Direction : Derek Jason Gilhousen
+System Concept & Workflow Philosophy         : Derek Jason Gilhousen
+Folder Model / Memory Philosophy             : Derek Jason Gilhousen
+Baseline Logic & Rendering                   : Claude (Anthropic)
+Multi-Tenant Refactoring                     : Gemini (Google)
+Code Merge, Predictive Analysis, Governance  : ChatGPT (OpenAI)
+════════════════════════════════════════════════════════════════════
+
+This file is the pure Python FN+AI runtime for GoddessMatrix.
+No bash subprocess calls except nvidia-smi (system binary).
+All concurrency via threading.Thread with daemon=True.
+
+── DEREK’S ROLE / ORIGINAL SYSTEM VISION ───────────────────────────
+  Derek defined the overall project intent:
+    A transparent, inspectable AI runtime where the AI can read,
+    learn from, and organize local text files while the user can review
+    the logic, logs, settings, and long-term memory artifacts directly.
+
+  Derek defined the four-folder operating model:
+    intscripts/
+      Active AI/runtime scripts and execution-side logic.
+    datas/
+      Long-term inspectable memory, settings, learned rules, persona,
+      vocabulary, theories, heuristics, and bug-traceable reasoning data.
+    intake/
+      Books, code, references, and other materials used to alter or
+      expand the AI’s internal organization.
+    convodata/
+      Conversation/session logs and Java bridge traffic.
+
+  Derek defined the philosophical constraint:
+    The system should not hide its growth. It should expose how books,
+    code, references, prompts, and runtime choices affect organization,
+    memory, response formatting, and future reasoning.
+
+  Derek also directed the AI model architecture:
+    The runtime should be able to choose between local text memory,
+    local GGUF models, and eventually online LLM providers depending
+    on user-controlled setup and feature governance.
+
+── CHATGPT CONTRIBUTIONS / INTEGRATION ROLE ────────────────────────
+  ChatGPT contributed merge strategy and predictive analysis:
+    Compared backup and newer versions, identified lost functionality,
+    restored concrete missing features, and avoided silently forcing
+    experimental behavior into the stable runtime path.
+
+  ChatGPT contributed experimental feature governance:
+    Proposed datas/experimental.txt as a user-reviewable feature
+    governance layer instead of a simple on/off switchboard.
+    Suggested authority modes:
+      USER       -> only the user may change the feature
+      AI_SUGGEST -> AI may propose changes but not apply them
+      AI_SELF    -> AI may self-toggle low-risk reversible features
+
+  ChatGPT contributed experimental_journal.txt:
+    Append-only record of experimental feature changes and proposals,
+    including timestamp, actor, feature, old value, new value, whether
+    it was applied, and the reason.
+
+  ChatGPT contributed log-memory access design:
+    The AI may read log files for self-optimization reference when
+    LOG_SELF_OPTIMIZATION_READ is enabled.
+    The AI may append to approved memory/log files when LOG_APPEND_MEMORY
+    is enabled, but helper functions should not rewrite or delete prior
+    log history.
+
+  ChatGPT contributed stability-vs-exploration separation:
+    Stable users can leave experimental features disabled.
+    Exploratory users can enable persona mutation, vocabulary evolution,
+    heuristic extraction, archivist passes, remote LLM routing, and
+    other advanced behaviors independently.
+
+  ChatGPT contributed modular provider-routing recommendation:
+    Online LLM providers such as ChatGPT, Gemini, Claude, or others
+    should be linked through a separate Python bridge/module rather
+    than hardwired directly into GoddessAPI.py. This keeps the main
+    runtime as orchestrator and lets provider logic update separately.
+
+── MULTI-TENANT ARCHITECTURE (Derek & Gemini) ──────────────────────
+  BASE = Path.cwd()
+    The script dynamically binds its root directory to the active
+    tenant node, such as /fn/fn1/, as assigned by the Java Matrix
+    ProcessBuilder. This provides state isolation across Matrix
+    sessions without context bleed.
+
+  MATRIX_ROOT = BASE.parent.parent
+    Escapes the tenant sandbox only for shared resources, such as
+    central GGUF models, preserving storage efficiency while keeping
+    tenant-local data separate.
+
+── SANDBOX RESILIENCE (Gemini) ─────────────────────────────────────
+  SystemProfiler fallbacks:
+    Deep hardware probes are wrapped so restricted osDev/chroot
+    environments degrade gracefully instead of breaking startup or
+    starving the Java HUD of telemetry.
+
+── PROTOCOL OUTPUT ─────────────────────────────────────────────────
+  status(), chat(), img(), type_cmd(), processing()
+    stdout protocol tags for GoddessMatrix.java communication.
+    flush=True on every print because Java reads line-by-line.
+
+  emit_action()
+    Emits [ACTION] to drive Mode B avatar pose in Java and can record
+    novel action words in output_vocabulary.txt.
+
+── PERMISSION DETECTION ────────────────────────────────────────────
+  detect_permissions()
+    Determines whether the runtime is elevated or restricted.
+    Restricted mode should remain functional for reading, reasoning,
+    and inference while blocking unsafe writes or side-effectful tools.
+
+── SEPARATE.TXT GOVERNANCE ─────────────────────────────────────────
+  read_separate(), tool_state_is_shared(), vocab_mode()
+    Reads separate.txt in the active tenant root and controls whether
+    tool state and vocabulary are shared or runtime-specific.
+
+── PERSONA ─────────────────────────────────────────────────────────
+  init_persona(), persona_read(), persona_append()
+  persona_set_key(), persona_get_key()
+    persona.txt is an inspectable AI self-model. Derek’s intent is
+    that users can observe, edit, and study how the AI describes itself
+    and how that changes over time.
+
+── OUTPUT VOCABULARY ───────────────────────────────────────────────
+  _vocab_path(), init_output_vocab(), vocab_read_all()
+  vocab_get(), vocab_set(), vocab_append_new()
+    output_vocabulary.txt stores response-formatting tendencies,
+    protocol terms, and evolving language preferences.
+
+── EXPERIMENTAL FEATURE GOVERNANCE (Derek & ChatGPT) ───────────────
+  experimental.txt
+    Lives in datas/ and controls optional/experimental behavior.
+    Designed so users can independently toggle features rather than
+    accepting one fixed runtime personality.
+
+  experimental_journal.txt
+    Append-only trace of proposals and changes, supporting bug tracking,
+    transparency, and review of how logic changes affect behavior.
+
+  LOG_SELF_OPTIMIZATION_READ
+    Allows the AI to read logs for self-optimization reference.
+
+  LOG_APPEND_MEMORY
+    Allows the AI to append to approved memory/log files while preventing
+    destructive modification of previous log history.
+
+── GPU DETECTION ───────────────────────────────────────────────────
+  _nvidia_smi()
+    Calls nvidia-smi directly via subprocess.run(). Return code is used
+    as the signal. No GPUtil dependency required.
+
+── ENCYCLOPEDIA / RELIGION PIPELINE ────────────────────────────────
+  _parse_blocks(filepath, tag)
+    Parses [TAG]...[/TAG] blocks from plain-text files.
+
+  encyclopedia.txt
+    Validated GGUF overlay. ReasoningEngine checks this before falling
+    back to base files.
+
+  religion.txt
+    Theory queue. Ideas can mature through repeated proposal/scoring
+    before promotion into encyclopedia.txt.
+
+── GGUF ENCYCLOPEDIA ───────────────────────────────────────────────
+  find_gguf(), find_image_gguf()
+  GGUFEncyclopedia class
+    Wraps llama_cpp.Llama and uses local GGUF models as an inspectable
+    local reasoning/interpretation source.
+
+  enrich_word(), enrich_query()
+    Convert local model inferences into proposed theories.
+
+  startup/shutdown_enrichment()
+    Manage offline-matured theories and final enrichment passes.
+
+── IMAGE GGUF ──────────────────────────────────────────────────────
+  ImageGGUF class
+    Handles local image interpretation where available and routes
+    derived descriptions into the same theory/encyclopedia path.
+
+── HARDWARE CACHE ──────────────────────────────────────────────────
+  load_hardware_cache(), save_hardware_cache()
+    Shared plain-text key=value hardware profile for both Python and
+    bash runtimes.
+
+── HIBERNATE STATE ─────────────────────────────────────────────────
+  save_hiberfile(), load_hiberfile()
+    JSON session memory storing session_start, save_ts, query_count,
+    and context.
+
+── TEXT EXTRACTION & ANALYSIS ──────────────────────────────────────
+  extract_file(), notable_words(), proper_nouns(), factual_sentences()
+    Reads books, code, references, and text files from intake and turns
+    them into inspectable memory artifacts.
+
+── DOCUMENT WRITERS & INTAKE ───────────────────────────────────────
+  write_dict_entry(), write_almanac_entry(), IntakeProcessor
+    Tenant-local knowledge writing, journal updates, and processed-file
+    movement after intake.
+
+── TOOL MANIFEST SYSTEM ────────────────────────────────────────────
+  scan_manifests(), execute_tool()
+    Reads resources/*.manifest and builds tool/pipeline awareness.
+
+── SELF-OPTIMIZATION ENGINE ────────────────────────────────────────
+  Optimizer class
+    Detects duplicate entries, ordering problems, theory maturation,
+    compression opportunities, and optional archivist/refactor passes.
+
+── HOT INTAKE WATCHER ──────────────────────────────────────────────
+  IntakeWatcher class
+    Watches intake directories and processes new files without restart.
+
+── REASONING ENGINE & LOG WATCHER ──────────────────────────────────
+  ReasoningEngine
+    Checks encyclopedia -> dictionary -> almanac -> thesaurus -> journal
+    and optionally maths/heuristics or other datas files.
+
+  LogWatcher
+    Tails tenant convodata.txt to capture Java-side user input.
+
+── GREETING / SESSION PROFILE ──────────────────────────────────────
+  build_greeting()
+    Writes session_profile.txt and session_profile.json for the Java HUD
+    and user review.
+
+── MAIN SYSTEM CLASS ───────────────────────────────────────────────
+  GoddessAPISystem class
+    Manages boot sequence, dependencies, local model wiring, watchers,
+    optimizer lifecycle, provider-routing hooks, and graceful shutdown.
+
+════════════════════════════════════════════════════════════════════
+"""

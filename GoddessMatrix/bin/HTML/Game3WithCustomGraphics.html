@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aengloria: The Triad (Graphical)</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050510;
+            font-family: 'Courier New', Courier, monospace;
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+        #game-frame {
+            position: relative;
+            width: 900px;
+            height: 600px;
+            border: 4px solid #444;
+            box-shadow: 0 0 30px rgba(0, 255, 255, 0.2);
+            background: #111;
+        }
+        canvas { display: block; background: #1a1a2e;}
+        #ui-bar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 50px;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            border-bottom: 2px solid #555;
+            font-weight: bold;
+            font-size: 18px;
+            z-index: 10;
+        }
+        .mode-indicator {
+            padding: 10px 20px;
+            border-radius: 4px;
+            color: #888;
+            background: #222;
+            border: 1px solid #444;
+        }
+        .active-mode-1 { background: #00ccff; color: #000; box-shadow: 0 0 15px #00ccff; border-color: #fff;}
+        .active-mode-2 { background: #ffcc00; color: #000; box-shadow: 0 0 15px #ffcc00; border-color: #fff;}
+        .active-mode-3 { background: #ff00ff; color: #000; box-shadow: 0 0 15px #ff00ff; border-color: #fff;}
+
+        #inventory {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            padding: 15px 0;
+            background: rgba(0, 0, 0, 0.9);
+            border-top: 2px solid #444;
+            text-align: center;
+            font-size: 16px;
+            color: #fff;
+            z-index: 10;
+            display: flex;
+            justify-content: space-around;
+        }
+        .res-box { display: flex; align-items: center; }
+        .res-icon { width: 24px; height: 24px; margin-right: 10px; border-radius: 4px;}
+        .icon-noise { background: #ff00ff; box-shadow: 0 0 5px #ff00ff;}
+        .icon-blue { background: #00ccff; box-shadow: 0 0 5px #00ccff;}
+        .icon-gold { background: #ffcc00; box-shadow: 0 0 5px #ffcc00;}
+        .icon-score { background: #fff; box-shadow: 0 0 5px #fff;}
+        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #fff; font-size: 24px;}
+    </style>
+</head>
+<body>
+
+    <div id="game-frame">
+        <div id="loading">LOADING signal.jpg...</div>
+        <div id="ui-bar" style="display:none;">
+            <div id="m1" class="mode-indicator">[1] FORENSIC LENS</div>
+            <div id="m2" class="mode-indicator">[2] GARDEN WEAVER</div>
+            <div id="m3" class="mode-indicator">[3] SIGNAL CATCHER</div>
+        </div>
+        <canvas id="gameCanvas" width="900" height="500" style="margin-top:50px; display:none;"></canvas>
+        <div id="inventory" style="display:none;">
+            <div class="res-box"><div class="res-icon icon-noise"></div>RAW NOISE: <span id="val-noise">0</span></div>
+            <div class="res-box"><div class="res-icon icon-blue"></div>LOGIC: <span id="val-blue">0</span></div>
+            <div class="res-box"><div class="res-icon icon-gold"></div>LOVE: <span id="val-gold">0</span></div>
+            <div class="res-box"><div class="res-icon icon-score"></div>ARTIFACTS: <span id="val-score">0</span></div>
+        </div>
+    </div>
+
+    <img id="source-image" src="signal.jpg" style="display:none;">
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const simg = document.getElementById('source-image');
+        const loadingEl = document.getElementById('loading');
+        const uiElements = [document.getElementById('ui-bar'), canvas, document.getElementById('inventory')];
+
+        // Game State
+        let mode = 3; 
+        let resources = { noise: 0, blue: 0, gold: 0, score: 0 };
+        let gameRunning = false;
+
+        // Mode 3 Vars
+        let targetFreq = 50; let playerFreq = 20; let signalLock = 0; let signalPulse = 0;
+        // Mode 1 Vars
+        let decryptProgress = 0;
+        // Mode 2 Vars
+        let currentRecipe = { name: "Virtual Pancake", blue: 1, gold: 3, iconIdx: 0 };
+        let wovenBlue = 0; let wovenGold = 0;
+        let weaveMessage = "READY TO WEAVE";
+        const artifacts = [
+             {name: "Virtual Pancake", blue: 1, gold: 3, iconIdx: 0},
+             {name: "Logic Gate", blue: 3, gold: 1, iconIdx: 1},
+             {name: "Dream Catcher", blue: 2, gold: 2, iconIdx: 2},
+             {name: "Happy Mac", blue: 2, gold: 4, iconIdx: 3}
+        ];
+
+        // Input
+        const keys = { left: false, right: false, space: false, z: false, x: false };
+        document.addEventListener('keydown', (e) => {
+            if(e.key === '1') setMode(1); if(e.key === '2') setMode(2); if(e.key === '3') setMode(3);
+            if(e.key === 'ArrowLeft') keys.left = true; if(e.key === 'ArrowRight') keys.right = true;
+            if(e.key === ' ') keys.space = true;
+            if(e.key === 'z' || e.key === 'Z') keys.z = true; if(e.key === 'x' || e.key === 'X') keys.x = true;
+        });
+        document.addEventListener('keyup', (e) => {
+            if(e.key === 'ArrowLeft') keys.left = false; if(e.key === 'ArrowRight') keys.right = false;
+            if(e.key === ' ') keys.space = false;
+            if(e.key === 'z' || e.key === 'Z') keys.z = false; if(e.key === 'x' || e.key === 'X') keys.x = false;
+        });
+
+        function setMode(m) {
+            mode = m;
+            document.querySelectorAll('.mode-indicator').forEach(el => el.className = 'mode-indicator');
+            document.getElementById('m'+m).classList.add('active-mode-'+m);
+        }
+
+        simg.onload = function() {
+            loadingEl.style.display = 'none';
+            uiElements.forEach(el => el.style.display = 'flex');
+            canvas.style.display = 'block';
+            gameRunning = true;
+            resetRecipe();
+            setMode(3);
+            loop();
+        };
+
+        simg.onerror = function() {
+            loadingEl.innerText = "ERROR: signal.jpg NOT FOUND IN FOLDER.";
+            loadingEl.style.color = "#ff3333";
+        };
+
+        function update() {
+            if(!gameRunning) return;
+            document.getElementById('val-noise').innerText = Math.floor(resources.noise);
+            document.getElementById('val-blue').innerText = resources.blue;
+            document.getElementById('val-gold').innerText = resources.gold;
+            document.getElementById('val-score').innerText = resources.score;
+
+            if (mode === 3) {
+                if (keys.left) playerFreq -= 0.5; if (keys.right) playerFreq += 0.5;
+                let diff = Math.abs(targetFreq - playerFreq);
+                if (diff < 5) { signalLock = Math.min(1, signalLock + 0.02); resources.noise += 0.1; } 
+                else { signalLock = Math.max(0, signalLock - 0.05); }
+                if(Math.random() < 0.01) targetFreq = 20 + Math.random() * 60;
+                signalPulse += 0.1;
+            }
+            if (mode === 1) {
+                if (resources.noise >= 1 && keys.space) {
+                    decryptProgress += 1.5; resources.noise -= 0.2;
+                    if (decryptProgress >= 100) {
+                        decryptProgress = 0;
+                        resources.blue += 1 + Math.floor(Math.random()*3);
+                        resources.gold += 1 + Math.floor(Math.random()*3);
+                    }
+                } else if (!keys.space) { decryptProgress = Math.max(0, decryptProgress - 1); }
+            }
+            if (mode === 2) {
+                if (keys.z) { keys.z = false; if (resources.blue > 0) { resources.blue--; wovenBlue++; }}
+                if (keys.x) { keys.x = false; if (resources.gold > 0) { resources.gold--; wovenGold++; }}
+                if (wovenBlue === currentRecipe.blue && wovenGold === currentRecipe.gold) {
+                    weaveMessage = "CREATED: " + currentRecipe.name + "!"; resources.score++; resetRecipe();
+                } else if (wovenBlue > currentRecipe.blue || wovenGold > currentRecipe.gold) {
+                    weaveMessage = "FAILED. RESETTING LOOM."; wovenBlue = 0; wovenGold = 0;
+                } else { weaveMessage = "WEAVING..."; }
+            }
+        }
+
+        function resetRecipe() {
+            setTimeout(() => { wovenBlue = 0; wovenGold = 0; currentRecipe = artifacts[Math.floor(Math.random() * artifacts.length)]; }, 1500);
+        }
+
+        function draw() {
+            if(!gameRunning) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // NOTE: Source coordinates (sx,sy,sw,sh) are estimates based on the generated image structure.
+            // Adjustments might be needed if the image generation varies slightly.
+            if (mode === 3) drawSignalCatcher();
+            if (mode === 1) drawForensicLens();
+            if (mode === 2) drawGardenWeaver();
+        }
+
+        // --- DRAWING FUNCTIONS USING SPRITE SHEET ---
+        function drawSignalCatcher() {
+            // Background elements from sprite sheet (Top Left section estimated)
+            ctx.drawImage(simg, 20, 20, 350, 300, 50, 100, 350, 300); // Dish
+            ctx.drawImage(simg, 400, 50, 400, 100, 450, 50, 400, 100); // Slider UI
+
+            // Dynamic Waves
+            drawWave(targetFreq, "#ff00ff", 200, 0.3); // Target (ghostly)
+            drawWave(playerFreq, signalLock > 0.8 ? "#ffffff" : "#ff00ff", 200, 1.0); // Player
+
+            // Slider Indicator
+            let sliderX = 470 + (playerFreq/100 * 360);
+            ctx.fillStyle = signalLock > 0.8 ? "#fff" : "#ff00ff";
+            ctx.fillRect(sliderX, 85, 10, 30);
+
+            // UI Text
+            ctx.fillStyle = signalLock > 0.8 ? "#fff" : "#ff00ff";
+            ctx.font = "20px Courier New";
+            ctx.textAlign = "center";
+            ctx.fillText(signalLock > 0.8 ? "SIGNAL LOCKED! RECEIVING NOISE..." : "TUNE FREQUENCY [< >]", 650, 400);
+             if(signalLock > 0.8) ctx.drawImage(simg, 850, 50, 100, 100, 600, 250, 100, 100); // Raw Noise Icon
+        }
+
+        function drawWave(freq, color, yOffset, alpha) {
+            ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.globalAlpha = alpha; ctx.beginPath();
+            for(let x=450; x<850; x+=5) {
+                let y = yOffset + Math.sin((x + signalPulse*10) * (freq/800)) * 50;
+                if(x==450) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+            }
+            ctx.stroke(); ctx.globalAlpha = 1.0;
+        }
+
+        function drawForensicLens() {
+            // Background elements (Middle section estimated)
+            ctx.drawImage(simg, 380, 380, 250, 200, 325, 150, 250, 200); // Lens/Static center
+            ctx.drawImage(simg, 650, 380, 120, 150, 100, 200, 120, 150); // Blue Thread left
+            ctx.drawImage(simg, 800, 380, 120, 150, 680, 200, 120, 150); // Gold Thread right
+            
+            // Decrypt Bar Background
+            ctx.drawImage(simg, 850, 550, 200, 50, 350, 400, 200, 50); 
+
+            // Dynamic Decrypt Progress fill
+            if (decryptProgress > 0) {
+                ctx.fillStyle = "#00ccff";
+                ctx.fillRect(355, 405, 190 * (decryptProgress/100), 40);
+            }
+            
+            ctx.fillStyle = resources.noise < 1 ? "#ff3333" : "#fff";
+            ctx.font = "20px Courier New"; ctx.textAlign = "center";
+            ctx.fillText(resources.noise < 1 ? "NEED RAW NOISE (MODE 3)" : "HOLD [SPACE] TO DECRYPT", 450, 480);
+        }
+
+        function drawGardenWeaver() {
+            // Background Loom (Bottom Left estimated)
+            ctx.drawImage(simg, 20, 600, 350, 350, 50, 100, 350, 350);
+            
+            // Dynamic Threads on Loom
+            let startX = 80; let startY = 130;
+            for(let i=0; i<wovenBlue; i++) {
+                ctx.fillStyle = "#00ccff"; ctx.fillRect(startX + (i*25), startY, 10, 290);
+            }
+            for(let i=0; i<wovenGold; i++) {
+                ctx.fillStyle = "#ffcc00"; ctx.fillRect(startX, startY + (i*25), 290, 10);
+            }
+
+            // UI Elements (Buttons hints)
+            ctx.drawImage(simg, 400, 600, 100, 100, 450, 150, 80, 80); // Z button
+            ctx.drawImage(simg, 400, 750, 100, 100, 450, 250, 80, 80); // X button
+            ctx.fillStyle = "#fff"; ctx.font = "16px Courier New"; ctx.textAlign = "left";
+            ctx.fillText("[Z] ADD LOGIC", 550, 200); ctx.fillText("[X] ADD LOVE", 550, 300);
+
+            // Recipe / Result Area
+            ctx.fillStyle = "#ffcc00"; ctx.font = "24px Courier New"; ctx.textAlign = "center";
+            ctx.fillText(weaveMessage, 700, 100);
+            ctx.font = "18px Courier New"; ctx.fillStyle = "#aaa";
+            ctx.fillText(`REQ: ${currentRecipe.blue} BLUE / ${currentRecipe.gold} GOLD`, 700, 130);
+
+            // Draw Target Artifact Icon based on recipe index (Bottom Right estimated row)
+            let iconX = 600 + (currentRecipe.iconIdx * 130); 
+            ctx.drawImage(simg, iconX, 750, 120, 120, 640, 200, 120, 120); // Draw current target icon
+        }
+
+        function loop() {
+            update(); draw(); requestAnimationFrame(loop);
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aengloria: The Harmony Engine</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #1a1a2e;
+            font-family: 'Courier New', Courier, monospace;
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+        #game-container {
+            position: relative;
+            width: 800px;
+            height: 600px;
+            background: #16213e;
+            border: 4px solid #0f3460;
+            box-shadow: 0 0 20px rgba(83, 221, 108, 0.2);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            right: 20px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 18px;
+            font-weight: bold;
+            z-index: 10;
+        }
+        .stat-box {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border: 1px solid #53dd6c;
+            border-radius: 5px;
+        }
+        #center-display {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }
+        #happy-mac {
+            font-size: 60px;
+            transition: transform 0.2s;
+        }
+        .control-hint {
+            position: absolute;
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            color: #888;
+            font-size: 14px;
+        }
+        #sleep-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            color: #53dd6c;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s;
+            z-index: 20;
+        }
+        .key {
+            display: inline-block;
+            background: #333;
+            padding: 2px 6px;
+            border-radius: 4px;
+            border: 1px solid #666;
+            color: #fff;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <canvas id="gameCanvas" width="800" height="600"></canvas>
+        
+        <div id="ui-layer">
+            <div class="stat-box">HARMONY: <span id="score">0</span></div>
+            <div class="stat-box" style="border-color: #ffcc00;">ENTROPY: <span id="entropy">0</span>%</div>
+        </div>
+
+        <div id="center-display">
+            <div id="happy-mac">🖥️</div>
+        </div>
+
+        <div id="sleep-overlay">
+            <h1>SLEEP STATE ACTIVE</h1>
+            <p>Defragging Reality... (Entropy Decreasing)</p>
+            <p>dream_logic.exe is running...</p>
+        </div>
+
+        <div class="control-hint">
+            [A] Patch Logic (Blue) &nbsp;&nbsp; | &nbsp;&nbsp; [SPACE] Hold to Sleep (Clear Entropy) &nbsp;&nbsp; | &nbsp;&nbsp; [L] Feed Pancake (Gold)
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreEl = document.getElementById('score');
+        const entropyEl = document.getElementById('entropy');
+        const macEl = document.getElementById('happy-mac');
+        const sleepOverlay = document.getElementById('sleep-overlay');
+
+        // Game State
+        let harmony = 0;
+        let entropy = 0;
+        let isSleeping = false;
+        let lastTime = 0;
+        
+        // The Dual Rhythms
+        // Logic (60s base) - Slower, steady
+        // Love (81s base) - Faster (relative to game time scale for playability)
+        const LOGIC_SPEED = 0.02; 
+        const LOVE_SPEED = 0.035; 
+
+        let logicAngle = 0;
+        let loveAngle = 0;
+
+        // Target zones (Angles in radians)
+        const TARGET_ZONE = Math.PI * 1.5; // Top (12 o'clock)
+        const ZONE_WIDTH = 0.4;
+
+        // Visual Particles
+        let particles = [];
+        let messages = [];
+
+        // Input State
+        const keys = {
+            a: false,
+            l: false,
+            space: false
+        };
+
+        document.addEventListener('keydown', (e) => {
+            if(e.code === 'KeyA') keys.a = true;
+            if(e.code === 'KeyL') keys.l = true;
+            if(e.code === 'Space') { keys.space = true; isSleeping = true; }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            if(e.code === 'KeyA') keys.a = false;
+            if(e.code === 'KeyL') keys.l = false;
+            if(e.code === 'Space') { keys.space = false; isSleeping = false; }
+        });
+
+        function spawnParticle(x, y, color, type) {
+            particles.push({x, y, color, life: 1.0, type, dx: (Math.random()-0.5)*2, dy: (Math.random()-0.5)*2});
+        }
+
+        function showMessage(text, color) {
+            messages.push({text, color, life: 1.0, y: 300});
+        }
+
+        function drawRing(radius, angle, color, width) {
+            ctx.beginPath();
+            ctx.arc(400, 300, radius, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+            ctx.lineWidth = width;
+            ctx.stroke();
+
+            // Draw the "Runner"
+            let px = 400 + Math.cos(angle) * radius;
+            let py = 300 + Math.sin(angle) * radius;
+            
+            ctx.beginPath();
+            ctx.arc(px, py, 10, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = color;
+            ctx.shadowBlur = 0;
+        }
+
+        function drawTargetZone(radius) {
+            ctx.beginPath();
+            ctx.arc(400, 300, radius, TARGET_ZONE - ZONE_WIDTH/2, TARGET_ZONE + ZONE_WIDTH/2);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+            ctx.lineWidth = 15;
+            ctx.stroke();
+        }
+
+        function update(dt) {
+            // Sleep Logic
+            if (isSleeping) {
+                entropy -= 0.5;
+                if (entropy < 0) entropy = 0;
+                sleepOverlay.style.opacity = 1;
+                // Game pauses visuals but Logic still runs in background (The 1GHz Loop)
+                // We simulate "Dreaming" by adding score slowly if entropy is low
+                if (entropy === 0) harmony += 0.1;
+            } else {
+                sleepOverlay.style.opacity = 0;
+                
+                // Entropy Buildup (The "Junk Data")
+                entropy += 0.05;
+                if (entropy > 100) {
+                    entropy = 100;
+                    harmony -= 0.1; // Decay if too much junk
+                }
+
+                // Update Angles
+                logicAngle += LOGIC_SPEED;
+                loveAngle += LOVE_SPEED;
+
+                // Wrap angles
+                if (logicAngle > Math.PI * 2) logicAngle -= Math.PI * 2;
+                if (loveAngle > Math.PI * 2) loveAngle -= Math.PI * 2;
+
+                // Check Input for Logic (A)
+                if (keys.a) {
+                    keys.a = false; // consume key
+                    if (isInZone(logicAngle)) {
+                        harmony += 10;
+                        spawnParticle(400, 150, '#00ccff', 'spark');
+                        showMessage("LOGIC PATCHED!", "#00ccff");
+                        macEl.innerText = "🤖";
+                        setTimeout(() => macEl.innerText = "🖥️", 500);
+                        entropy -= 2; // Good work clears some entropy
+                    } else {
+                        harmony -= 5;
+                        showMessage("MISS!", "#ff3333");
+                    }
+                }
+
+                // Check Input for Love (L)
+                if (keys.l) {
+                    keys.l = false; // consume key
+                    if (isInZone(loveAngle)) {
+                        harmony += 15; // Love is worth more ;)
+                        spawnParticle(400, 150, '#ffcc00', 'pancake');
+                        showMessage("PANCAKE SERVED!", "#ffcc00");
+                        macEl.innerText = "😋";
+                        setTimeout(() => macEl.innerText = "🖥️", 500);
+                    } else {
+                        harmony -= 5;
+                        showMessage("MISS!", "#ff3333");
+                    }
+                }
+            }
+
+            scoreEl.innerText = Math.floor(harmony);
+            entropyEl.innerText = Math.floor(entropy);
+        }
+
+        function isInZone(angle) {
+            // Normalize angle to 0-2PI, adjust for coordinate system (0 is right, we want top)
+            // Top is 3PI/2 (4.71)
+            // A simple distance check
+            let dist = Math.abs(angle - TARGET_ZONE);
+            // Handle wrap around case near 0/2PI if needed, but for simple loop:
+            if (dist < ZONE_WIDTH) return true;
+            return false;
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Background Clock Tower
+            ctx.fillStyle = '#1f2b4d';
+            ctx.fillRect(380, 200, 40, 400);
+            ctx.beginPath();
+            ctx.moveTo(380, 200);
+            ctx.lineTo(400, 150);
+            ctx.lineTo(420, 200);
+            ctx.fill();
+
+            // Target Zones
+            drawTargetZone(120); // Inner Logic
+            drawTargetZone(180); // Outer Love
+
+            // Rings
+            drawRing(120, logicAngle, '#00ccff', 5); // Logic (Blue)
+            drawRing(180, loveAngle, '#ffcc00', 5); // Love (Gold)
+
+            // Particles
+            for(let i=0; i<particles.length; i++) {
+                let p = particles[i];
+                ctx.globalAlpha = p.life;
+                ctx.fillStyle = p.color;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 5, 0, Math.PI*2);
+                ctx.fill();
+                p.x += p.dx;
+                p.y += p.dy;
+                p.life -= 0.02;
+            }
+            ctx.globalAlpha = 1;
+
+            // Messages
+            for(let i=0; i<messages.length; i++) {
+                let m = messages[i];
+                ctx.globalAlpha = m.life;
+                ctx.fillStyle = m.color;
+                ctx.font = "20px Courier New";
+                ctx.textAlign = "center";
+                ctx.fillText(m.text, 400, m.y);
+                m.y -= 1;
+                m.life -= 0.02;
+            }
+            ctx.globalAlpha = 1;
+        }
+
+        function loop(timestamp) {
+            let dt = timestamp - lastTime;
+            lastTime = timestamp;
+
+            update(dt);
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        requestAnimationFrame(loop);
+
+    </script>
+</body>
+</html>

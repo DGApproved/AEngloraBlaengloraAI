@@ -1,0 +1,225 @@
+# ════════════════════════════════════════════════════════════════════
+# GODDESS API — BASH RUNTIME (GoddessAPI.sh)
+# Contributions by Claude (Anthropic)
+# ════════════════════════════════════════════════════════════════════
+#
+# This file is the pure bash AI-alone runtime for GoddessMatrix.
+# No Python. No jq. Every feature is implemented using only:
+# awk, sed, grep, sort, find, md5sum, bash builtins, nvidia-smi.
+#
+# ── PROTOCOL OUTPUT ──────────────────────────────────────────────
+#   status(), chat(), img(), type_cmd(), processing()
+#     All stdout protocol tags for GoddessMatrix.java communication.
+#     flush is implicit in bash printf; each tag is a single line.
+#   emit_action()
+#     Emits [ACTION] tag to drive Mode B avatar pose in Java.
+#     Records novel action words in output_vocabulary.txt automatically.
+#
+# ── PERMISSION DETECTION ─────────────────────────────────────────
+#   detect_permissions()
+#     Probes write access at startup. Sets ELEVATED=true|false.
+#     All knowledge evolution, tool execution, and file writes gate
+#     on this flag. Restricted mode is read-only LLM behaviour.
+#
+# ── SEPARATE.TXT GOVERNANCE ──────────────────────────────────────
+#   read_separate(), tool_state_is_shared(), vocab_file()
+#     Reads convodata/separate.txt to decide whether tool state and
+#     output vocabulary are shared between runtimes or per-runtime.
+#     "yes" → separate tool state; "no" → separate vocab files;
+#     empty → shared file, each runtime ignores the other's prefixes.
+#
+# ── PERSONA ──────────────────────────────────────────────────────
+#   init_persona(), persona_read(), persona_set_key(), persona_get_key()
+#     persona.txt is a shared file the AI writes freely with no imposed
+#     schema. These functions give the bash runtime structured access
+#     without restricting what the AI chooses to record there.
+#     All writes gate on ELEVATED.
+#
+# ── OUTPUT VOCABULARY ─────────────────────────────────────────────
+#   init_output_vocab(), vocab_get(), vocab_set(), vocab_append_new()
+#     Reads and writes output_vocabulary.txt (or separate file if
+#     separate.txt = "no"). Lines prefixed sh: are bash-only;
+#     py: lines are skipped; untagged lines are shared.
+#     Baseline seeds written at first init. AI evolves the file at
+#     every reboot, prompt, and resource scan.
+#
+# ── ENCYCLOPEDIA / RELIGION PIPELINE ─────────────────────────────
+#   init_encyclopedia(), encyclopedia_search(), encyclopedia_write_entry()
+#     encyclopedia.txt is the GGUF overlay. Reasoning engine reads it
+#     FIRST before falling back to dictionary/almanac/thesaurus.
+#     Persists across GGUF model swaps. Writes gated by GGUF_WRITE_ALLOWED
+#     AND ELEVATED — never touched by the optimization loop.
+#   init_religion(), religion_propose_theory(), religion_score_theories()
+#   religion_promote_ready()
+#     religion.txt is the theory queue. GGUF queries propose theories
+#     (STATUS=PENDING). The optimizer scores them freely without the
+#     write gate (it only updates religion.txt, never encyclopedia.txt).
+#     Score = min(1.0, TIMES_PROPOSED * 0.25). Promotes at score >= 0.70.
+#     Only promoted theories reach encyclopedia.txt, and only during
+#     the three write-gated events: startup, user input, shutdown.
+#   _parse_blocks (inline awk)
+#     Parses [ENTRY]...[/ENTRY] and [THEORY]...[/THEORY] blocks from
+#     both files. Shared plain-text format readable by both runtimes.
+#
+# ── GGUF ENCYCLOPEDIA ─────────────────────────────────────────────
+#   find_gguf()
+#     Finds text GGUF files (excludes filenames containing "(image)").
+#   find_llama_bin()
+#     Checks standard install paths then local directory for llama-cli.
+#   query_gguf()
+#     Calls llama binary directly. Each call reloads model from disk
+#     (bash limitation — no persistent in-process state).
+#   gguf_enrich_word(), gguf_enrich_query()
+#     Propose word/topic theories to religion.txt then call
+#     religion_promote_ready(). GGUF file itself is never modified.
+#   gguf_startup_enrichment()
+#     Startup event: promote offline-matured theories, propose word
+#     theories for top dictionary entries.
+#   gguf_shutdown_enrichment()
+#     Shutdown event: propose theories for placeholder definitions,
+#     final promotion pass.
+#
+# ── IMAGE GGUF ────────────────────────────────────────────────────
+#   find_image_gguf()
+#     Detects .gguf with "(image)" in filename as the vision model.
+#   process_intake_image()
+#     Describes an image from intake/ using llama-cli --image flag
+#     (llava/moondream style). Flows result through religion.txt
+#     pipeline into encyclopedia.txt. GGUF file never modified.
+#   process_all_intake_images()
+#     Batch processes all image files in intake subdirectories.
+#     Runs only when GGUF_WRITE_ALLOWED=true and ELEVATED=true.
+#   image_ext_supported()
+#     Tests whether a file extension is a supported image format.
+#
+# ── HARDWARE CACHE (shared plain-text format) ─────────────────────
+#   generate_fingerprint()
+#     MD5 of CPU model, arch, core count, RAM total. Detects hardware
+#     changes between sessions without storing sensitive data.
+#   load_hardware_cache(), scan_and_save_hardware()
+#     Cache is plain key=value text (no JSON, no jq) so both the bash
+#     and Python runtimes can read and write the same file.
+#     GPU detection uses nvidia-smi directly via returncode check —
+#     no GPUtil, no ValueError from error string parsing.
+#
+# ── HIBERNATE STATE (AIsh.hiberfile, bash key=value) ──────────────
+#   save_hiberfile(), load_hiberfile(), ctx_append(), offline_duration()
+#     Separate from GoddessAPI.py's AIpy.hiberfile (JSON format).
+#     bash uses declare -g to store context entries as CTX_N_ROLE/DATA/TS
+#     variables, serialised to key=value on save.
+#
+# ── TEXT EXTRACTION (no Python) ───────────────────────────────────
+#   extract_file()
+#     Handles .txt/.sh/.py/.js/.c/.cpp/.java/.md via cat.
+#     Handles .pdf via pdftotext if present (optional dep).
+#   notable_words(), proper_nouns(), factual_sentences()
+#     Pure bash text analysis using grep -oE, sort, uniq -c, awk.
+#     No Python regex engine — produces equivalent output via
+#     POSIX extended regular expressions.
+#
+# ── DOCUMENT WRITERS ─────────────────────────────────────────────
+#   write_dict_entry(), write_thes_entry(), write_almanac_entry()
+#     All write gates check ELEVATED. Alphabetical section headers
+#     inserted on first use. Duplicate headword detection via grep.
+#     journal_append() timestamps every write with ms-since-midnight.
+#
+# ── INTAKE PROCESSOR ─────────────────────────────────────────────
+#   process_intake_file(), process_all_intake()
+#     Processes text files from intake/books/, intake/code/,
+#     intake/reference/. Moves to intake/processed/ after reading.
+#     Writes dictionary, thesaurus, almanac, and journal entries.
+#     Emits [STATUS] and [CHAT] tags during processing.
+#
+# ── TOOL MANIFEST SYSTEM ─────────────────────────────────────────
+#   scan_manifests()
+#     Scans /resources/*.manifest at startup and shutdown.
+#     Each manifest is a plain key=value file with NAME, BINARY,
+#     DESCRIPTION, INPUT_FORMAT, OUTPUT_FORMAT, ARGS, TAGS.
+#     Writes an almanac entry per tool, registers each in vocab,
+#     and auto-populates shared.txt with compatible pipeline pairs
+#     by comparing OUTPUT_FORMAT/INPUT_FORMAT fields across manifests.
+#   tool_state_file(), is_tool_enabled(), set_tool_enabled()
+#   load_tool_state_count()
+#     tool_state.txt persists which tools the user has enabled.
+#     Shared unless separate.txt = "yes" (then tool_state_sh.txt).
+#     All writes gate on ELEVATED.
+#   classify_tool_intent()
+#     Routes query through GGUF model if present (ENABLE/DISABLE/NONE
+#     response format). Keyword fallback if model absent: matches
+#     "use X", "look at X", "stop using X" patterns against known
+#     tool names from manifests. Sets TOOL_INTENT_ACTION and
+#     TOOL_INTENT_NAME for handle_query to act on.
+#   execute_tool()
+#     Runs a /resources binary with sandbox-compatible subprocess.
+#     Substitutes {INPUT} in ARGS template. Logs exit code and
+#     output length to journal. Appends last result to shared.txt.
+#     Blocked in restricted mode.
+#   try_enabled_tools()
+#     Checks all enabled tools for TAGS overlap with current query.
+#     Fires the first match and stores output in TOOL_OUTPUT.
+#
+# ── shared.txt PIPELINE MAP ───────────────────────────────────────
+#   Written by scan_manifests(). Format:
+#     TOOL_A>TOOL_B : OUTPUT=... INPUT=...
+#   Derived from field compatibility across manifest pairs.
+#   AI may extend the file. Last tool execution result appended.
+#
+# ── SELF-OPTIMIZATION ENGINE ──────────────────────────────────────
+#   optimize_dictionary(), optimize_thesaurus(), optimize_almanac()
+#     Detect duplicate headwords and out-of-order entries.
+#     Count changes as the optimization score.
+#   run_optimization_pass()
+#     Runs all three optimizers plus religion_score_theories()
+#     (which needs no write gate — only updates religion.txt).
+#     Returns total change count.
+#   wake_optimizer(), optimization_loop()
+#     Background subshell wakes via touch of OPTIM_WAKE_FILE.
+#     Runs every 30s until delta < 1, then rests. Woken by user
+#     input or new intake file detection.
+#
+# ── HOT INTAKE WATCHER ────────────────────────────────────────────
+#   intake_watcher_inotify(), intake_watcher_poll()
+#     Uses inotifywait if available for instant file detection.
+#     Falls back to find|md5sum polling every 10s if not installed.
+#   start_intake_watcher()
+#     Selects and launches the appropriate watcher in background.
+#     New files processed without session restart.
+#
+# ── REASONING ENGINE ──────────────────────────────────────────────
+#   search_file(), reason_respond()
+#     Checks encyclopedia.txt FIRST (GGUF-validated overlay),
+#     then falls back to dictionary, almanac, thesaurus, journal.
+#     Pure grep-based search — no Python regex.
+#
+# ── LOG WATCHER ───────────────────────────────────────────────────
+#   log_watcher(), start_log_watcher()
+#     Polls convodata/convodata.txt for new #AI> USER> lines written
+#     by GoddessMatrix.java. Skips GODDESS> and API_OVERRIDE lines
+#     to prevent response loops. Runs as background job.
+#
+# ── QUERY HANDLER ─────────────────────────────────────────────────
+#   handle_query()
+#     Emits [ACTION] PROCESSING at entry, classifies tool intent,
+#     handles enable/disable or fires enabled tools, reasons over
+#     knowledge base, emits response via [CHAT] tags, runs GGUF
+#     enrichment, updates vocab at every prompt, emits [ACTION] IDLE.
+#
+# ── SHUTDOWN ──────────────────────────────────────────────────────
+#   do_shutdown()
+#     Emits [ACTION] SHUTDOWN. Kills background workers cleanly.
+#     Runs final GGUF shutdown enrichment and resource scan.
+#     Updates vocab with session summary. Saves hiberfile.
+#     Removes optimizer wake file.
+#
+# ── STARTUP SEQUENCE ──────────────────────────────────────────────
+#   Full startup order:
+#     detect_permissions → init_documents (includes encyclopedia,
+#     religion, persona, output_vocab) → init_intake →
+#     persona boot record → hardware cache/scan →
+#     intake processing → image intake (if image GGUF present) →
+#     hibernate restore → resource manifest scan →
+#     background workers (intake watcher, log watcher, optimizer) →
+#     GGUF encyclopedia startup enrichment → vocab evolution hooks →
+#     greeting → emit_action IDLE
+#
+# ════════════════════════════════════════════════════════════════════
