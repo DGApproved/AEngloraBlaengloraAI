@@ -9,3 +9,16 @@ MANIFEST_IMAGE: fn1-cd-20260425_004916.png
 # USER> fn+NTR opens terminal in chroot using osDev as chroot dir which auto mounts/umounts at launch/exit NTR alone opens a terminal with MANIFEST_IMAGE: fn1-cd-20260425_023729.png
 #A: INTERACTION_DETECTED: GET / HTTP/1.1" 200 5203 "-" "curl/7.64.1
 #A: INTERACTION_DETECTED: GET / HTTP/1.1" 200 1730 "-" "curl/7.74.0
+SYSTEM> REFRESH_RATE_SYNCED: Auto (Actual: 144Hz)
+SYSTEM> INITIALIZING GODDESS_API HOOK FOR FN1
+API_STDOUT> The system cannot find the path specified.
+SYSTEM> INITIALIZING GODDESS_API HOOK FOR FN1
+API_STDOUT> The system cannot find the path specified.
+SYSTEM> INITIALIZING GODDESS_API HOOK FOR FN1
+API_STDOUT> python: can't open file 'C:\Users\DGApproved\AengloraBlaengloraAI\GoddessMatrix\scrpt\Windows\GoddessAPI.py': [Errno 2] No such file or directory
+SYSTEM> INITIALIZING GODDESS_API HOOK FOR FN1
+API_STDOUT> The system cannot find the path specified.
+SYSTEM> NATIVE_EXPLORER_TRIGGERED [C:\Users\DGApproved\AengloraBlaengloraAI\GoddessMatrix\scrpt\Windows]
+ERROR> MODULE_NOT_INSTALLED: modular.Terminal
+SYSTEM> REFRESH_RATE_SYNCED: Auto (Actual: 144Hz)
+USER> Test
