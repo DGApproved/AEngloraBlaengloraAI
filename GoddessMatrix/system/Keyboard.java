@@ -275,7 +275,11 @@ public class Keyboard
         KeyboardFocusManager.getCurrentKeyboardFocusManager()
                 .addKeyEventDispatcher(e -> {
 
-            if (e.getID() != KeyEvent.KEY_PRESSED) return false;
+            if (e.getID() != KeyEvent.KEY_PRESSED
+                    && e.getID() != KeyEvent.KEY_RELEASED)
+            {
+                return false;
+            }
 
                 // ── GAME MODE KEY PASSTHROUGH ─────────────────────────────────────
                 // When IceSandbox is embedded in the manifest panel, the Matrix
@@ -283,14 +287,30 @@ public class Keyboard
                 // IceSandbox's own KeyListener sees them. This guard passes those keys
                 // through so the game canvas receives them directly.
                 // All other keys (FN, modifier combos, etc.) still route through Matrix.
-                if (state.isGameModeActive) {
-                    int kc = e.getKeyCode();
-                    if (kc == KeyEvent.VK_W     || kc == KeyEvent.VK_A    ||
-                        kc == KeyEvent.VK_S     || kc == KeyEvent.VK_D    ||
-                        kc == KeyEvent.VK_SPACE || kc == KeyEvent.VK_ESCAPE ||
-                        kc == KeyEvent.VK_E) {
-                        return false; // let event reach the focused IceSandbox panel
+                if (state.isGameModeActive
+                        && state.imageViewerMaximized
+                        && state.sandboxInstance != null)
+                {
+                    modular.game.KeyState gameKeys =
+                            state.sandboxInstance.getKeyState();
+
+                    if (gameKeys != null
+                            && gameKeys.isGameKey(e.getKeyCode()))
+                    {
+                        // Forward dynamic keybinds into IceSandbox
+
+                        if (e.getID() == KeyEvent.KEY_PRESSED)
+                            gameKeys.onKeyPressed(e.getKeyCode());
+
+                        else if (e.getID() == KeyEvent.KEY_RELEASED)
+                            gameKeys.onKeyReleased(e.getKeyCode());
+
+                        // Let Swing continue routing into focused game panel
+                        return false;
                     }
+
+                    // Non-game keys stay trapped in Matrix OS
+                    return true;
                 }
                 // ─────────────────────────────────────────────────────────────────
 
@@ -655,7 +675,7 @@ public class Keyboard
         updateModifierVisuals();
     }
 
-    private void toggleExecMode() 
+private void toggleExecMode() 
     {
         boolean turningOn = !state.isSystemModeActive;
         state.isSystemModeActive = turningOn;
@@ -663,7 +683,18 @@ public class Keyboard
         state.isScriptModeActive = false;
         state.isCloudModeActive  = false;
         state.sessionModes.put(state.currentSession, turningOn ? 1 : 0);
-        if (state.uiWindow != null) state.uiWindow.loadSession(state.currentSession);
+        
+        // --- ADDED: Load appropriate log view ---
+        if (state.chatHistory != null) {
+            if (turningOn) {
+                // If turning ON Exec mode, load the specific exec log
+                java.io.File execLog = new java.io.File(state.sessionDirectories.get(state.currentSession), "exec_log.txt");
+                state.chatHistory.loadLogFile(execLog);
+            } else {
+                // If turning OFF Exec mode, revert back to the main session chat log
+                if (state.uiWindow != null) state.uiWindow.loadSession(state.currentSession);
+            }
+        }
         updateModifierVisuals();
     }
 
@@ -684,6 +715,7 @@ public class Keyboard
             state.uiWindow.stopGoddessAPI(state.currentSession);
         }
 
+        // AI Mode generally shares the main chat log, so we just reload the standard session
         if (state.uiWindow != null) state.uiWindow.loadSession(state.currentSession);
         updateModifierVisuals();
     }
@@ -696,7 +728,18 @@ public class Keyboard
         state.isAIModeActive     = false;
         state.isCloudModeActive  = false;
         state.sessionModes.put(state.currentSession, turningOn ? 3 : 0);
-        if (state.uiWindow != null) state.uiWindow.loadSession(state.currentSession);
+        
+        // --- ADDED: Load appropriate log view ---
+        if (state.chatHistory != null) {
+            if (turningOn) {
+                // If turning ON Script mode, load the specific script log
+                java.io.File scriptLog = new java.io.File(state.sessionDirectories.get(state.currentSession), "script_log.txt");
+                state.chatHistory.loadLogFile(scriptLog);
+            } else {
+                // If turning OFF Script mode, revert back to the main session chat log
+                if (state.uiWindow != null) state.uiWindow.loadSession(state.currentSession);
+            }
+        }
         updateModifierVisuals();
     }
 
