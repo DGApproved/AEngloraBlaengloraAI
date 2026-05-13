@@ -294,23 +294,18 @@ public class ApiBridge {
 
             } else if (line.startsWith("[WORLD_") || line.startsWith("[GAME_") ||
                     line.startsWith("[ENTITY_") || line.startsWith("[PANEL_")) {
+                // Also call aiResponseHook if a modular feature has registered one
+                if (state.aiResponseHook != null) {
+                    try { state.aiResponseHook.onLine(line); }
+                    catch (Exception ignored) {}
+                }
                 // ── GAME PROTOCOL DISPATCH ────────────────────────────────────
                 // Routes game tags to the active IceSandbox GameProtocol instance.
                 // state.gameProtocol is set by modular.Game on launch, null otherwise.
                 // Safe to call when game is not running — instanceof check guards it.
-                //direct cast method
-                //if (state.gameProtocol instanceof modular.game.GameProtocol) {
-                //    ((modular.game.GameProtocol) state.gameProtocol).handleTag(line);
-                //}
-                //reflection call method
-                if (state.gameProtocol != null) {
-                    try {
-                        state.gameProtocol.getClass()
-                            .getMethod("handleTag", String.class)
-                            .invoke(state.gameProtocol, line);
-                    } catch (Exception ignored) {}
+                if (state.gameProtocol instanceof modular.game.GameProtocol) {
+                    ((modular.game.GameProtocol) state.gameProtocol).handleTag(line);
                 }
-
 
             } else if (line.startsWith("[")) {
                 if (state.chatHistory != null) {

@@ -32,30 +32,76 @@ public class TerminalRunner {
     // ─────────────────────────────────────────────
     // EXTERNAL TERMINAL LAUNCH (NTR)
     // ─────────────────────────────────────────────
-    public void launchExternalTerminal(boolean asChroot, File targetDir) {
+    public void launchExternalTerminal(boolean asChroot) {
         try {
-            File dir = resolveTargetDirectory(asChroot, targetDir);
+            String os = System.getProperty("os.name").toLowerCase();
+            ProcessBuilder pb;
 
-            String[] cmd;
+            if (asChroot) {
+                // 1. Safely resolve the script directory through the MatrixState
+                File scriptDir = state.uiWindow != null 
+                        ? state.uiWindow.getOSScriptFolderFile() 
+                        : new File(state.scriptRootDirectory, state.isWindows ? "Windows" : (state.isMac ? "MacOSY" : "Linux"));
+                scriptDir.mkdirs();
 
-            if (state.isWindows) {
-                cmd = new String[]{"cmd.exe", "/c", "start", "cmd.exe"};
+                File chrootScript = new File(scriptDir, "chroot_env.sh");
+                
+                // 2. Generate the chroot script dynamically if it's missing
+                if (!chrootScript.exists() && state.osDevDir != null) {
+                    String scriptContent =
+                            "#!/bin/bash\n" +
+                            "CHROOT_DIR=\"" + state.osDevDir.getAbsolutePath() + "\"\n" +
+                            "echo 'SYSTEM> MOUNTING CHROOT VOLUMES...'\n" +
+                            "sudo mount -t proc /proc \"$CHROOT_DIR/proc\"\n" +
+                            "sudo mount -t sysfs /sys \"$CHROOT_DIR/sys\"\n" +
+                            "sudo mount -o bind /dev \"$CHROOT_DIR/dev\"\n" +
+                            "sudo mount -o bind /dev/pts \"$CHROOT_DIR/dev/pts\"\n" +
+                            "echo 'SYSTEM> ENTERING CHROOT ENVIRONMENT...'\n" +
+                            "sudo chroot \"$CHROOT_DIR\" /bin/bash\n" +
+                            "echo 'SYSTEM> CHROOT EXITED. UNMOUNTING VOLUMES...'\n" +
+                            "sudo umount \"$CHROOT_DIR/dev/pts\"\n" +
+                            "sudo umount \"$CHROOT_DIR/dev\"\n" +
+                            "sudo umount \"$CHROOT_DIR/sys\"\n" +
+                            "sudo umount \"$CHROOT_DIR/proc\"\n" +
+                            "echo 'SYSTEM> CLEANUP COMPLETE. CLOSING TERMINAL.'\n" +
+                            "sleep 2\n";
+                    java.nio.file.Files.write(chrootScript.toPath(), scriptContent.getBytes());
+                    chrootScript.setExecutable(true);
+                }
+
+                // 3. Launch via OS-specific bridge
+                if (os.contains("win")) {
+                    pb = new ProcessBuilder("cmd.exe", "/c", "start", "wsl.exe", "--exec", "bash", chrootScript.getAbsolutePath());
+                    if (state.chatHistory != null) state.chatHistory.appendSystem("LAUNCHING WSL CHROOT BRIDGE...");
+                } else if (os.contains("mac")) {
+                    pb = new ProcessBuilder("open", "-a", "Terminal", chrootScript.getAbsolutePath());
+                } else {
+                    pb = new ProcessBuilder("x-terminal-emulator", "-e", chrootScript.getAbsolutePath());
+                    if (state.chatHistory != null) state.chatHistory.appendSystem("LAUNCHING EXTERNAL CHROOT TERMINAL...");
+                }
             } else {
-                // Linux / Mac fallback
-                cmd = new String[]{
-                        "x-terminal-emulator",
-                        "--working-directory=" + dir.getAbsolutePath()
-                };
+                // Standard non-chroot terminal launches
+                if (os.contains("win")) {
+                    pb = new ProcessBuilder("cmd.exe", "/c", "start", "cmd.exe");
+                } else if (os.contains("mac")) {
+                    pb = new ProcessBuilder("open", "-a", "Terminal");
+                } else {
+                    pb = new ProcessBuilder("x-terminal-emulator");
+                }
             }
-
-            new ProcessBuilder(cmd)
-                    .directory(dir)
-                    .start();
-
-            setStatus("SYS_EXEC: TERMINAL_LAUNCHED");
-
+            
+            // 4. Safely pull the working directory from the MatrixState
+            pb.directory(state.currentWorkingDirectory);
+            pb.start();
+            
+            // 5. Use the local setStatus helper
+            setStatus(asChroot ? "SYS_EXEC: CHROOT_TERMINAL_OPEN" : "SYS_EXEC: TERMINAL_OPENED");
+            
         } catch (Exception e) {
-            setStatus("SYS_EXEC: TERMINAL_FAIL");
+            setStatus("SYS_EXEC: FAILED");
+            if (state.chatHistory != null) {
+                state.chatHistory.appendError("TERMINAL_LAUNCH_FAILED: " + e.getMessage());
+            }
         }
     }
 
