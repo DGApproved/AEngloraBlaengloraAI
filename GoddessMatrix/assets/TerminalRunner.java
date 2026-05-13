@@ -34,19 +34,19 @@ public class TerminalRunner {
     // ─────────────────────────────────────────────
     public void launchExternalTerminal(boolean asChroot) {
         try {
-            String os = System.getProperty("os.name").toLowerCase();
             ProcessBuilder pb;
 
             if (asChroot) {
-                // 1. Safely resolve the script directory through the MatrixState
-                File scriptDir = state.uiWindow != null 
-                        ? state.uiWindow.getOSScriptFolderFile() 
-                        : new File(state.scriptRootDirectory, state.isWindows ? "Windows" : (state.isMac ? "MacOSY" : "Linux"));
+                // 1. Resolve script directory via state OS flags
+                File scriptDir = state.uiWindow != null
+                        ? state.uiWindow.getOSScriptFolderFile()
+                        : new File(state.scriptRootDirectory,
+                            state.isWindows ? "Windows" : (state.isMac ? "MacOSY" : "Linux"));
                 scriptDir.mkdirs();
 
                 File chrootScript = new File(scriptDir, "chroot_env.sh");
-                
-                // 2. Generate the chroot script dynamically if it's missing
+
+                // 2. Generate chroot script dynamically if missing
                 if (!chrootScript.exists() && state.osDevDir != null) {
                     String scriptContent =
                             "#!/bin/bash\n" +
@@ -69,21 +69,26 @@ public class TerminalRunner {
                     chrootScript.setExecutable(true);
                 }
 
-                // 3. Launch via OS-specific bridge
-                if (os.contains("win")) {
-                    pb = new ProcessBuilder("cmd.exe", "/c", "start", "wsl.exe", "--exec", "bash", chrootScript.getAbsolutePath());
-                    if (state.chatHistory != null) state.chatHistory.appendSystem("LAUNCHING WSL CHROOT BRIDGE...");
-                } else if (os.contains("mac")) {
-                    pb = new ProcessBuilder("open", "-a", "Terminal", chrootScript.getAbsolutePath());
+                // 3. Launch via state OS flags — no inline os.name needed
+                if (state.isWindows) {
+                    pb = new ProcessBuilder("cmd.exe", "/c", "start", "wsl.exe",
+                            "--exec", "bash", chrootScript.getAbsolutePath());
+                    if (state.chatHistory != null)
+                        state.chatHistory.appendSystem("LAUNCHING WSL CHROOT BRIDGE...");
+                } else if (state.isMac) {
+                    pb = new ProcessBuilder("open", "-a", "Terminal",
+                            chrootScript.getAbsolutePath());
                 } else {
-                    pb = new ProcessBuilder("x-terminal-emulator", "-e", chrootScript.getAbsolutePath());
-                    if (state.chatHistory != null) state.chatHistory.appendSystem("LAUNCHING EXTERNAL CHROOT TERMINAL...");
+                    pb = new ProcessBuilder("x-terminal-emulator", "-e",
+                            chrootScript.getAbsolutePath());
+                    if (state.chatHistory != null)
+                        state.chatHistory.appendSystem("LAUNCHING EXTERNAL CHROOT TERMINAL...");
                 }
             } else {
-                // Standard non-chroot terminal launches
-                if (os.contains("win")) {
+                // Standard terminal — use state OS flags
+                if (state.isWindows) {
                     pb = new ProcessBuilder("cmd.exe", "/c", "start", "cmd.exe");
-                } else if (os.contains("mac")) {
+                } else if (state.isMac) {
                     pb = new ProcessBuilder("open", "-a", "Terminal");
                 } else {
                     pb = new ProcessBuilder("x-terminal-emulator");
