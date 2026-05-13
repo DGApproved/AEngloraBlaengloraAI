@@ -181,17 +181,6 @@ public class SphereRenderer
         }
     }
 
-    //Color Blender
-    private int blendColor(int c1, int c2, float t) {
-        t = Math.max(0f, Math.min(1f, t));
-        int r1 = (c1 >> 16) & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = c1 & 0xFF;
-        int r2 = (c2 >> 16) & 0xFF, g2 = (c2 >> 8) & 0xFF, b2 = c2 & 0xFF;
-        int r = (int)(r1 + (r2 - r1) * t);
-        int g = (int)(g1 + (g2 - g1) * t);
-        int b = (int)(b1 + (b2 - b1) * t);
-        return (r << 16) | (g << 8) | b;
-    }
-
     // ── RAY MARCHER ───────────────────────────────────────────────────────────
 
     private int march(float rox, float roy, float roz,
@@ -212,11 +201,7 @@ public class SphereRenderer
             if (d < SURF_DIST)
             {
                 // Hit — calculate normal and shade
-                int surfaceColor = shade(px, py, pz, res.materialType, world);
-                
-                // Atmospheric depth fog (light tinted blue)
-                float fogFactor = 1.0f - (float)Math.exp(-t * 0.02f);
-                return blendColor(surfaceColor, 0x55AADD, fogFactor * 0.8f);
+                return shade(px, py, pz, res.materialType, world);
             }
 
             t += d;
@@ -224,28 +209,7 @@ public class SphereRenderer
         }
 
         // Miss — sky/void color
-        int skyCol = skyColor(rdx, rdy, rdz, world);
-        
-        // Atmospheric Halo around the planet
-        WorldState.SystemPlanet planet = world.planets[world.activePlanet];
-        if (planet != null) {
-            float atmoRadius = planet.coreRadius * 1.35f; // 35% larger than core
-            float b = 2.0f * (rox*rdx + roy*rdy + roz*rdz);
-            float c = (rox*rox + roy*roy + roz*roz) - atmoRadius*atmoRadius;
-            float disc = b*b - 4.0f*c;
-            if (disc > 0) {
-                float t1 = (-b - (float)Math.sqrt(disc)) / 2.0f;
-                float t2 = (-b + (float)Math.sqrt(disc)) / 2.0f;
-                float atmoDist = Math.max(0, t2 - Math.max(0, t1));
-                if (atmoDist > 0) {
-                    float glow = Math.min(1.0f, atmoDist / (atmoRadius * 1.5f));
-                    skyCol = blendColor(skyCol, 0x55AADD, glow * 0.9f); 
-                }
-            }
-        }
-        return skyCol;
-        // Miss — sky/void color
-        //return skyColor(rdx, rdy, rdz, world);
+        return skyColor(rdx, rdy, rdz, world);
     }
 
     // ── SCENE SDF ─────────────────────────────────────────────────────────────
@@ -274,13 +238,47 @@ public class SphereRenderer
         if (planet == null) return new SDFResult(MAX_DIST, WorldState.MAT_VOID, 0);
 
         // ── BEDROCK CORE ──────────────────────────────────────────────────────
-        // Always present. Sphere at planet center.
         float coreDist = sphereSDF(px, py, pz, 0f, 0f, 0f, planet.coreRadius);
         if (coreDist < minDist)
         {
             minDist = coreDist;
             minMat  = WorldState.MAT_BEDROCK;
             minHard = WorldState.HARD_STRUCTURAL;
+        }
+
+        // ── PLAYER POSITION MARKER ────────────────────────────────────────────
+        // Small glowing sphere just above the surface at the player's feet.
+        // Visible from any distance — gives immediate WASD movement feedback.
+        // Also marks the North Pole (lat 0, lon 0) as a fixed reference point.
+        {
+            float[] pp = world.playerPos;
+            float markerR = 0.18f;
+            // Lift marker just above surface so it's never inside bedrock
+            float latR = (float)Math.toRadians(world.playerLatDeg);
+            float angR = (float)Math.toRadians(world.playerAngleDeg);
+            float outX = (float)(Math.cos(latR) * Math.sin(angR));
+            float outY = (float)Math.sin(latR);
+            float outZ = (float)(Math.cos(latR) * Math.cos(angR));
+            float mx = pp[0] + outX * (markerR + 0.05f);
+            float my = pp[1] + outY * (markerR + 0.05f);
+            float mz = pp[2] + outZ * (markerR + 0.05f);
+            float markerDist = sphereSDF(px, py, pz, mx, my, mz, markerR);
+            if (markerDist < minDist)
+            {
+                minDist = markerDist;
+                minMat  = WorldState.MAT_AVATAR_GLOW;
+                minHard = WorldState.HARD_VOID;
+            }
+
+            // Fixed reference marker at North Pole (lon=0, lat=0 equator front)
+            float refDist = sphereSDF(px, py, pz,
+                planet.coreRadius + 0.05f, 0f, 0f, 0.12f);
+            if (refDist < minDist)
+            {
+                minDist = refDist;
+                minMat  = WorldState.MAT_CRAFTED_GOLD;
+                minHard = WorldState.HARD_VOID;
+            }
         }
 
         // ── PLAYER AVATAR (Glasses Off / Selfie Mode) ─────────────────────────
@@ -449,7 +447,75 @@ public class SphereRenderer
                 minHard = WorldState.HARD_STRUCTURAL;
             }
         }
-// ── TERRAIN SPHERES ───────────────────────────────────────────────────
+        // ── GRID SPHERES ──────────────────────────────────────────────────────
+        // Spheres placed at every lat/lon grid intersection on the planet surface.
+        // Minor intersections (every 2°): small spheres, light grey.
+        // Major intersections (every 10°): larger spheres, slightly brighter grey.
+        // 5 minor spheres nest inside 1 major sphere — differentiates from
+        // flat graph paper while keeping the same spatial reference utility.
+        // Rendered as a closed-form SDF loop — no arrays, no allocation.
+        // Grid is purely visual overlay; does not affect terrain collision.
+        {
+            float cR   = planet.coreRadius;
+            float minorStep = 2f;   // degrees between minor grid intersections
+            float majorStep = 10f;  // degrees between major grid intersections (5 minor)
+            float minorR = 0.04f;   // minor node sphere radius (small, subtle)
+            float majorR = 0.10f;   // major node sphere radius (5x minor area)
+            float surfaceOffset = 0.015f; // just proud of the bedrock surface
+
+            // Snap the query point to its nearest lat/lon
+            float qLen = (float)Math.sqrt(px*px + py*py + pz*pz);
+            if (qLen > 0.1f)
+            {
+                float qLat = (float)Math.toDegrees(Math.asin(py / qLen));
+                float qLon = (float)Math.toDegrees(Math.atan2(px, pz));
+
+                // Find the 4 nearest minor grid intersections and test each.
+                // This is O(4) per march step — no loop over the whole globe.
+                float latBase = (float)Math.floor(qLat / minorStep) * minorStep;
+                float lonBase = (float)Math.floor(qLon / minorStep) * minorStep;
+
+                for (int di = 0; di <= 1; di++)
+                {
+                    for (int dj = 0; dj <= 1; dj++)
+                    {
+                        float gLat = latBase + di * minorStep;
+                        float gLon = lonBase + dj * minorStep;
+
+                        // Clamp lat to valid range
+                        if (gLat < -89f || gLat > 89f) continue;
+
+                        // Is this intersection also a major node?
+                        float latMajMod = ((gLat % majorStep) + majorStep) % majorStep;
+                        float lonMajMod = ((gLon % majorStep) + majorStep) % majorStep;
+                        boolean isMajor = latMajMod < 0.01f && lonMajMod < 0.01f;
+
+                        float nodeR  = isMajor ? majorR : minorR;
+                        int   nodeMat = isMajor
+                            ? WorldState.MAT_AGGREGATE_T   // major: medium grey
+                            : WorldState.MAT_BEDROCK;      // minor: near-bedrock, very subtle
+
+                        // World position of this grid node (on surface)
+                        float latRad = (float)Math.toRadians(gLat);
+                        float lonRad = (float)Math.toRadians(gLon);
+                        float nLen   = cR + nodeR * 0.5f + surfaceOffset;
+                        float nx2    = nLen * (float)(Math.cos(latRad) * Math.sin(lonRad));
+                        float ny2    = nLen * (float)Math.sin(latRad);
+                        float nz2    = nLen * (float)(Math.cos(latRad) * Math.cos(lonRad));
+
+                        float gd = sphereSDF(px, py, pz, nx2, ny2, nz2, nodeR);
+                        if (gd < minDist)
+                        {
+                            minDist = gd;
+                            minMat  = nodeMat;
+                            minHard = WorldState.HARD_VOID;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── TERRAIN SPHERES ───────────────────────────────────────────────────
         // Only evaluate spheres within LOD threshold of current position.
         float playerDist = (float) Math.sqrt(px*px + py*py + pz*pz);
 
@@ -474,12 +540,6 @@ public class SphereRenderer
 
             if (sd < minDist)
             {
-                // FABRIC WEAVE MICRO-DISPLACEMENT
-                if (s.materialType == WorldState.MAT_AGGREGATE_D && playerDist < 15.0f) {
-                    float weave = (float)(Math.sin(px * 40f) * Math.sin(py * 40f) * Math.sin(pz * 40f)) * 0.015f;
-                    sd += weave;
-                }
-
                 minDist = sd;
                 minMat  = s.materialType;
                 minHard = s.hardness;
@@ -554,6 +614,8 @@ public class SphereRenderer
     private int shade(float px, float py, float pz,
                       int materialType, WorldState world)
     {
+        int effectiveMat = materialType; // surface color unchanged — grid is sphere-based
+
         float[] n = normal(px, py, pz, world);
 
         // Camera direction toward surface point
@@ -573,7 +635,7 @@ public class SphereRenderer
             // Single shadow ray for now; multi-ray soft shadows future work
             double shadow = 1.0; // shadow ray handled by march occlusion
             return OptimizeRender.PBR.shade(
-                materialType,
+                effectiveMat,
                 n[0], n[1], n[2],
                 vx, vy, vz,
                 lightX, lightY, lightZ,
@@ -581,9 +643,8 @@ public class SphereRenderer
         }
         else
         {
-            // Lambert for distant geometry — cheaper
             return OptimizeRender.PBR.shadeLambert(
-                materialType, n[0], n[1], n[2],
+                effectiveMat, n[0], n[1], n[2],
                 lightX, lightY, lightZ, 1.0);
         }
     }

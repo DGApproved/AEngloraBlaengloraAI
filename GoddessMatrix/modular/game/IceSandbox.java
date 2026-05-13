@@ -230,14 +230,14 @@ public class IceSandbox extends JPanel implements Runnable, KeyListener, MouseLi
         // Physics receives camYawSmooth for camera-relative WASD movement.
         // AstridHeadYaw = head angle relative to body facing — for avatar
         // rendering only, computed as the difference between camera and body.
+        // Layer 1 — Body:  bodyFacingYaw    — where WASD moves (set by PlayerPhysics)
+        // Layer 2 — Head:  camYawSmooth     — mouse, free rotation (absolute)
+        //                  AstridHeadYaw    — head relative to body (set by PlayerPhysics.writeToWorld)
+        // Layer 3 — Eyes:  world.eyeYaw     — arrow keys, ±30° relative to head
+        // Final view:
         world.cameraYaw   = camYawSmooth + world.eyeYaw;
         world.cameraPitch = Math.max(-85f, Math.min(85f, camPitchSmooth + world.eyePitch));
-        // Avatar head angle relative to body (wrap to ±180°)
-        float relHead = camYawSmooth - world.playerAngleDeg;
-        while (relHead >  180f) relHead -= 360f;
-        while (relHead < -180f) relHead += 360f;
-        world.AstridHeadYaw   = relHead;
-        world.AstridHeadPitch = camPitchSmooth;
+        world.AstridHeadPitch = camPitchSmooth; // head pitch for animation
     }
 
     private void updateAstridLimbControls()

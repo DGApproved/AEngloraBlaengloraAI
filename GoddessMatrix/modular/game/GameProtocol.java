@@ -90,17 +90,21 @@ public class GameProtocol
         // Add to in-game chat history as the player's message
         addChatMessage("YOU", t);
 
+        // Prefix with [GAME_INPUT:] so GoddessAPI knows to respond
+        // with [GAME_CHAT:] (short, in-world) rather than [CHAT:] (full).
+        // Wrap as [GAME_QUERY:text] so GoddessAPI.py and GoddessAPI.sh both
+        // route to atmospheric distillation → [GAME_CHAT:≤32 chars].
+        String tagged = "[GAME_QUERY:" + t + "]";
+
         if (aiSendHook != null)
         {
-            // Matrix hook path — preferred
-            try { aiSendHook.send(t); }
+            try { aiSendHook.send(tagged); }
             catch (Exception e) { logError("AISendHook", e); }
             writeEvent("C_KEY_QUERY", t.substring(0, Math.min(80, t.length())));
         }
         else if (pythonStdin != null)
         {
-            // Standalone fallback — direct stdin
-            pythonStdin.println(t);
+            pythonStdin.println(tagged);
             pythonStdin.flush();
             writeEvent("C_KEY_QUERY", t.substring(0, Math.min(80, t.length())));
         }

@@ -24,7 +24,10 @@ public class PlayerPhysics
     private static final float WALK_SPEED_DEG = 1.0f;
 
     private float angleDeg = 0f, latDeg = 0f, altitude = 0f, vertVelocity = 0f, cameraYaw = 0f;
-    private float absoluteRadius = 0f; // Tracks absolute distance from planet center
+    private float absoluteRadius = 0f;
+    // Direction the body is physically facing — updated when WASD moves.
+    // Separate from cameraYaw (where eyes point) and angleDeg (sphere position).
+    private float bodyFacingYaw = 0f;
     private boolean jumping = false;
     private boolean moveLeft = false, moveRight = false, moveForward = false, moveBack = false;
 
@@ -95,10 +98,14 @@ public class PlayerPhysics
         float fwdAngle = (float)Math.sin(yawRad), fwdLat = (float)Math.cos(yawRad);
         float rightAngle = (float)Math.cos(yawRad), rightLat = -(float)Math.sin(yawRad);
 
-        if (moveForward) { angleDeg += fwdAngle * speed; latDeg += fwdLat * speed; }
-        if (moveBack) { angleDeg -= fwdAngle * speed; latDeg -= fwdLat * speed; }
-        if (moveRight) { angleDeg += rightAngle * speed; latDeg += rightLat * speed; }
-        if (moveLeft) { angleDeg -= rightAngle * speed; latDeg -= rightLat * speed; }
+        boolean moving = false;
+        if (moveForward) { angleDeg += fwdAngle * speed; latDeg += fwdLat * speed; moving = true; }
+        if (moveBack)    { angleDeg -= fwdAngle * speed; latDeg -= fwdLat * speed; moving = true; }
+        if (moveRight)   { angleDeg += rightAngle * speed; latDeg += rightLat * speed; moving = true; }
+        if (moveLeft)    { angleDeg -= rightAngle * speed; latDeg -= rightLat * speed; moving = true; }
+        // When walking, body facing snaps to the movement direction.
+        // When still, body facing holds its last value.
+        if (moving) bodyFacingYaw = cameraYaw;
         wrapClampSurface();
 
         // Initialize absolute radius on first frame
@@ -136,11 +143,17 @@ public class PlayerPhysics
 
     public void writeToWorld(WorldState world, float floorRadius)
     {
-        world.playerAngleDeg = angleDeg; 
-        world.playerLatDeg = latDeg; 
-        world.playerAltitudeFeet = altitude; // purely for debug display now
-        world.isJumping = jumping; 
+        world.playerAngleDeg  = angleDeg;
+        world.playerLatDeg    = latDeg;
+        world.playerAltitudeFeet = altitude;
+        world.isJumping       = jumping;
         world.verticalVelocity = vertVelocity;
+        // Body facing — used by renderer to orient the avatar torso.
+        // Head yaw relative to body = cameraYaw - bodyFacingYaw.
+        // This is what AstridHeadYaw should represent.
+        world.bodyFacingYaw   = bodyFacingYaw;
+        world.AstridHeadYaw   = cameraYaw - bodyFacingYaw;
+        world.headYaw         = world.AstridHeadYaw;
 
         // Use the absolute radius directly for exact visual placement!
         float r = absoluteRadius; 

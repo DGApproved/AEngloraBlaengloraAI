@@ -118,16 +118,18 @@ public class WorldState
     public float playerAngleDeg     = 0.0f;
     public float playerAltitudeFeet = 0.0f;
     public float[] playerPos = {0f, 0f, 0f};
+    // Body facing yaw — direction the avatar's torso is physically facing.
+    // Updated by PlayerPhysics when WASD moves. Separate from playerAngleDeg
+    // (sphere position) and from cameraYaw (where eyes point).
+    // AstridHeadYaw = cameraYaw - bodyFacingYaw (for avatar body/head animation).
+    public float bodyFacingYaw = 0f;
 
-    // Body facing: set by WASD via playerAngleDeg — defines forward
-    // Head: mouse-driven, relative to body. ±90° yaw, ±85° pitch.
     public float AstridHeadYaw   = 0f;
     public float AstridHeadPitch = 0f;
     public float headYaw         = 0f;
     public float headPitch       = 0f;
-    // Eyes: arrow-key-driven, relative to head. Tight arc ±30°.
-    // Allows fine focus (reading a book, checking a shelf label)
-    // without moving the head.
+    // Eyes: arrow-key-driven, ±30° relative to head.
+    // Fine focus — read a book, check a shelf — without moving the head.
     public float eyeYaw   = 0f;
     public float eyePitch = 0f;
 
@@ -181,12 +183,7 @@ public class WorldState
     public int goldThreads = 0;
     public int artifacts = 0;
 
-    public List<GameNode> gameNodes = new ArrayList<>();
-    public GameNode activeMiniGame = null;
-
     // ── IN-GAME CHAT HISTORY ──────────────────────────────────────────────────
-    // Populated by [GAME_CHAT:] tags from GoddessAPI.
-    // Rendered as a scrolling conversation above the input line when C is open.
     public static class ChatMessage {
         public final String speaker; // "YOU" or "AI"
         public final String text;
@@ -196,6 +193,9 @@ public class WorldState
     }
     public final java.util.ArrayDeque<ChatMessage> chatMessages = new java.util.ArrayDeque<>();
     public static final int MAX_CHAT_MESSAGES = 12;
+
+    public List<GameNode> gameNodes = new ArrayList<>();
+    public GameNode activeMiniGame = null;
 
     public static class SystemPlanet
     {
@@ -265,18 +265,16 @@ public class WorldState
         { this.htmlFile = htmlFile; this.title = title; this.mechanic = mechanic; this.angleDeg = angleDeg; this.latDeg = latDeg; }
     }
 
-    // ── SCALE TIER MATH ───────────────────────────────────────────────────────
-
-    public static float sphereDiameterAtTier(int tier, float worldScaleMultiplier)
+    public static float scaledSphereDiameter(int tier, float worldScaleMultiplier)
     {
         float diameter = BASE_DIAMETER_FT * worldScaleMultiplier;
         for (int i = 0; i < tier; i++) diameter /= SUBDIVISIONS;
         return diameter;
     }
 
-    public static boolean tierBreachesMinimum(int tier, float worldScaleMultiplier)
+    public static boolean miniTierSphereSizes(int tier, float worldScaleMultiplier)
     {
-        return sphereDiameterAtTier(tier, worldScaleMultiplier) < MIN_SPHERE_SIZE_FT;
+        return scaledSphereDiameter(tier, worldScaleMultiplier) < MIN_SPHERE_SIZE_FT;
     }
 
     public static int charHardness(char c)
