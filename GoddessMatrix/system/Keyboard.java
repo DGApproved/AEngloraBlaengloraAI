@@ -13,20 +13,9 @@ package system;
  * - extension buttons 107-112
  * - optional modular feature launch by reflection
  * - analog debounce noise filter (tunable via experimental.txt)
- *
- * Extension Buttons:
- * 107 [Update]   -> modular.Update
- * 108 [DIR]      -> native scripts folder opener
- * 109 [Server]   -> modular.LLMs
- * 110 [Terminal] -> modular.Terminal
- * 111 [Game]     -> modular.Game
- * 112 [App]      -> modular.App
- *
- * Analog Debounce:
- * - Controlled by ANALOG_DEBOUNCE and ANALOG_DEBOUNCE_MS in experimental.txt
- * - Resolved once at installHardwareBridge() and cached on MatrixState
- * - Not re-read per keypress — experimental flags are session-stable for timing paths
- * - Tunable: raise threshold for degraded/worn hardware, lower or disable for fast typists
+ * - universal USB key passthrough (fault tolerant)
+ * - dynamic module mounting via matrix_modules.cfg
+ * - chassis introspection (JAR vs IDE remapping)
  */
 
 import assets.MatrixConfig;
@@ -36,18 +25,25 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.datatransfer.*;
 import java.awt.event.KeyEvent;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Method;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Files;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Properties;
 
 public class Keyboard 
 {
     private final MatrixState state;
     private JPanel panel;
 
-    private final Map<Integer, JButton>   buttons   = new HashMap<>();
+    private final Map<Integer, JButton>   buttons    = new HashMap<>();
     private final Map<Integer, String[]>  dualKeyMap = createDualKeyMap();
+    //DynamicScaling
+    private final Map<Integer, java.awt.Rectangle> baseBounds = new HashMap<>();
+    private float currentScale = 1.0f;
 
     public Keyboard(MatrixState state) 
     {
@@ -59,6 +55,10 @@ public class Keyboard
 
     public void initialize() 
     {
+        try {
+            // Read the physical hardware LED to perfectly sync the matrix state on boot
+            state.isNumLockActive = Toolkit.getDefaultToolkit().getLockingKeyState(KeyEvent.VK_NUM_LOCK);
+        } catch (Exception ignored) {}
         updateModifierVisuals();
     }
 
@@ -232,107 +232,141 @@ public class Keyboard
         b.setFocusPainted(false);
         b.setMargin(new Insets(0, 0, 0, 0));
         b.setBorder(BorderFactory.createLineBorder(new Color(255, 255, 255, 10), 1));
-        b.addActionListener(e -> handleMatrixEvent(index, b, true));
 
-        // ── [Game] BUTTON RIGHT-CLICK → CINEMATIC FULLSCREEN ─────────────────
-        // Right-clicking [Game] (button 111) when game is active expands the
-        // manifest panel to fullscreen via the existing glass pane mechanism.
-        // Left-click on [Game] still uses the normal ActionListener above
-        // (starts game if inactive, stops game if active).
-        if (index == 111)
-        {
-            b.addMouseListener(new java.awt.event.MouseAdapter()
-            {
+        // ── COMPLEX HARDWARE BUTTONS (PWR(calc) & GAME) ──
+        if (index == 85 || index == 111) {
+            b.addMouseListener(new java.awt.event.MouseAdapter() {
                 @Override
-                public void mouseClicked(java.awt.event.MouseEvent e)
-                {
-                    if (e.getButton() == java.awt.event.MouseEvent.BUTTON3
-                            && state.isGameModeActive
-                            && state.imageViewer != null)
-                    {
-                        state.imageViewer.enterCinematicPassthrough();
+                public void mouseClicked(java.awt.event.MouseEvent e) {
+                    if (index == 111) {
+                        // [Game] Button Logic
+                        if (SwingUtilities.isRightMouseButton(e) && state.isGameModeActive && state.imageViewer != null) {
+                            state.imageViewer.enterCinematicPassthrough();
+                        } else if (SwingUtilities.isLeftMouseButton(e)) {
+                            handleMatrixEvent(111, b, true);
+                        }
+                    } else if (index == 85) {
+                        // [PWR] Button Logic: Two-Stage Calculator Security
+                        if (SwingUtilities.isRightMouseButton(e)) {
+                            state.isCalculatorUnlocked = !state.isCalculatorUnlocked;
+                            setStatus("SYS_CALC: " + (state.isCalculatorUnlocked ? "UNLOCKED" : "LOCKED"));
+                            flashButton(b, true);
+                        } else if (SwingUtilities.isLeftMouseButton(e)) {
+                            if (state.isCalculatorUnlocked) {
+                                // Route through CalculatorEngine.togglePower()
+                                // so the 0-29 boot sequence runs on power-on.
+                                String bootResult = CalculatorEngine.togglePower();
+                                state.isCalculatorEnabled = CalculatorEngine.isPoweredOn();
+
+                                setStatus("SYS_CALC: "
+                                        + (state.isCalculatorEnabled ? "POWER ON" : "POWER OFF"));
+
+                                if (state.chatHistory != null)
+                                    state.chatHistory.appendSystem(bootResult);
+
+                                if (state.isCalculatorEnabled)
+                                {
+                                    // Auto-switch ImageViewer to Mode C
+                                    state.manifestViewMode = 2;
+                                    if (state.imageViewer != null)
+                                        state.imageViewer.getPanel().repaint();
+                                }
+                                else
+                                {
+                                    // Collapse graph if open when powering off
+                                    if (state.imageViewer != null)
+                                        state.imageViewer.collapseGraphMode();
+                                    state.manifestViewMode = 0;
+                                }
+                            } else {
+                                setStatus("SYS_CALC: LOCKED (R-CLICK TO UNLOCK)");
+                            }
+                            flashButton(b, true);
+                        }
                     }
                 }
             });
+        } else {
+            // Standard Buttons
+            b.addActionListener(e -> handleMatrixEvent(index, b, true));
         }
-        // ─────────────────────────────────────────────────────────────────────
 
+        baseBounds.put(index, new java.awt.Rectangle(x, y, w, h));
         buttons.put(index, b);
         return b;
     }
 
+    public void applyScale(float scale) {
+        this.currentScale = scale;
+        
+        // Multiply the exact coordinates and dimensions of every single key
+        for (Map.Entry<Integer, JButton> entry : buttons.entrySet()) {
+            int id = entry.getKey();
+            JButton btn = entry.getValue();
+            java.awt.Rectangle base = baseBounds.get(id);
+            if (base != null) {
+                btn.setBounds((int)(base.x * scale), (int)(base.y * scale), 
+                              (int)(base.width * scale), (int)(base.height * scale));
+            }
+        }
+        updateModifierVisuals(); // Forces the fonts to scale to match the new key sizes
+    }
+
     // ── HARDWARE BRIDGE ───────────────────────────────────────────────────────
-    // Resolves ANALOG_DEBOUNCE settings once at install time.
-    // Experimental flags are not re-read per keypress — timing paths need
-    // stable values, and flag reads from disk on every event would be wrong.
 
     public void installHardwareBridge() 
     {
-        // ── RESOLVE DEBOUNCE SETTINGS FROM experimental.txt ───────────────────
         resolveDebounceSettings();
-        // ─────────────────────────────────────────────────────────────────────
 
         KeyboardFocusManager.getCurrentKeyboardFocusManager()
                 .addKeyEventDispatcher(e -> {
 
-            if (e.getID() != KeyEvent.KEY_PRESSED
-                    && e.getID() != KeyEvent.KEY_RELEASED)
+            // ── MODULAR KEY HOOK ──────────────────────────────────────────────
+            // Called first, before all Matrix logic, for every event type.
+            // The registered module decides what to consume and what to ignore.
+            // Register via state.keyHook in the modular feature; clear on stop.
+            if (state.keyHook != null) {
+                try {
+                    if (state.keyHook.onKeyEvent(e)) return true; // consumed
+                } catch (Exception ex) {
+                    // Module fault — clear hook and log so Matrix stays running
+                    state.keyHook = null;
+                    if (state.chatHistory != null)
+                        state.chatHistory.logModularCrash("KeyHook", ex);
+                }
+            }
+
+            if (e.getID() != KeyEvent.KEY_PRESSED)
             {
                 return false;
             }
 
-                // ── GAME MODE KEY PASSTHROUGH ─────────────────────────────────────
-                // When IceSandbox is embedded in the manifest panel, the Matrix
-                // KeyEventDispatcher would normally consume WASD/SPACE/ESC/E before
-                // IceSandbox's own KeyListener sees them. This guard passes those keys
-                // through so the game canvas receives them directly.
-                // All other keys (FN, modifier combos, etc.) still route through Matrix.
-                if (state.isGameModeActive
-                        && state.imageViewerMaximized
-                        && state.sandboxInstance != null)
-                {
-                    modular.game.KeyState gameKeys =
-                            state.sandboxInstance.getKeyState();
+            // ── PHYSICAL NUMLOCK ENFORCEMENT ──
+            // Allows numpad through if software NumLock is engaged OR the Calculator is active
+            if (e.getKeyLocation() == KeyEvent.KEY_LOCATION_NUMPAD 
+                && !state.isNumLockActive 
+                && !state.isCalculatorEnabled) {
+                return true;
+            }
 
-                    if (gameKeys != null
-                            && gameKeys.isGameKey(e.getKeyCode()))
-                    {
-                        // Forward dynamic keybinds into IceSandbox
-
-                        if (e.getID() == KeyEvent.KEY_PRESSED)
-                            gameKeys.onKeyPressed(e.getKeyCode());
-
-                        else if (e.getID() == KeyEvent.KEY_RELEASED)
-                            gameKeys.onKeyReleased(e.getKeyCode());
-
-                        // Let Swing continue routing into focused game panel
-                        return false;
-                    }
-
-                    // Non-game keys stay trapped in Matrix OS
-                    return true;
-                }
-                // ─────────────────────────────────────────────────────────────────
-
-            // ── CINEMATIC PASSTHROUGH ─────────────────────────────────────────
-            if (state.imageViewer != null && state.imageViewer.isCinematicPassthrough()) {
+            // ── CINEMATIC PASSTHROUGH (non-modular AI sessions) ───────────────
+            // Only fires when no modular hook is registered.
+            if (state.keyHook == null && state.imageViewer != null
+                    && state.imageViewer.isCinematicPassthrough()) {
                 state.imageViewer.routeKeyPressToSession(e.getKeyCode(), e.getKeyChar());
                 return true;
             }
 
             // ── ANALOG DEBOUNCE ───────────────────────────────────────────────
-            // Same key within the debounce window = noise. Different key always
-            // passes through — the filter is per-key, not global.
             if (state.debounceEnabled) {
                 long now = System.currentTimeMillis();
                 if (e.getKeyCode() == state.lastKeyCode
                         && (now - state.lastKeyPressTime) < state.debounceMs) {
-                    return true; // swallow the duplicate
+                    return true; 
                 }
                 state.lastKeyCode      = e.getKeyCode();
                 state.lastKeyPressTime = now;
             }
-            // ─────────────────────────────────────────────────────────────────
 
             if (e.getKeyCode() == KeyEvent.VK_PAUSE) {
                 handleMatrixEvent(14, buttons.get(14), false);
@@ -359,25 +393,14 @@ public class Keyboard
             }
 
             return false;
-        }); //KeyboardFocusManager
+        });
     }
 
-    /**
-     * Reads ANALOG_DEBOUNCE and ANALOG_DEBOUNCE_MS from experimental.txt
-     * (via goddess_experimental_patch.py defaults if the file is absent)
-     * and caches the resolved values on MatrixState.
-     *
-     * Falls back to true / 40ms if the patch is not present or the file
-     * cannot be read — conservative default protects worn hardware.
-     */
     private void resolveDebounceSettings() 
     {
-        // Default conservative values — protect worn hardware if patch absent
         state.debounceEnabled = true;
         state.debounceMs      = 40;
 
-        // Try reading from experimental.txt in FN1's datas dir as the global
-        // reference — all sessions share the same experimental.txt layout.
         try {
             java.io.File sessionDir = state.sessionDirectories.get(state.currentSession);
             if (sessionDir == null) sessionDir = new java.io.File(
@@ -386,7 +409,7 @@ public class Keyboard
             java.io.File expFile = new java.io.File(
                     sessionDir, "dgapi/datas/experimental.txt");
 
-            if (!expFile.exists()) return; // stay with defaults
+            if (!expFile.exists()) return; 
 
             for (String line : java.nio.file.Files.readAllLines(expFile.toPath())) {
                 line = line.trim();
@@ -394,7 +417,6 @@ public class Keyboard
 
                 String key = line.substring(0, line.indexOf('=')).trim();
                 String val = line.substring(line.indexOf('=') + 1).trim();
-                // Format: MODE:STATE or MODE:STATE:VALUE
                 String[] parts = val.split(":", 3);
 
                 if ("ANALOG_DEBOUNCE".equals(key) && parts.length >= 2) {
@@ -409,8 +431,18 @@ public class Keyboard
                 }
             }
         } catch (Exception ignored) {
-            // Safe fallback — if the file can't be read, keep defaults
         }
+    }
+
+    // ── SYSTEM INTROSPECTION ──────────────────────────────────────────────────
+
+    /**
+     * Detects if the OS is compiled (JAR) or on a test bench (IDE/Filesystem)
+     */
+    private boolean isRunningFromJar() {
+        String className = this.getClass().getName().replace('.', '/') + ".class";
+        java.net.URL classUrl = this.getClass().getClassLoader().getResource(className);
+        return classUrl != null && classUrl.getProtocol().equals("jar");
     }
 
     // ── EVENT DISPATCH ────────────────────────────────────────────────────────
@@ -458,8 +490,7 @@ public class Keyboard
             boolean doChroot = state.isFnPending;
             state.isFnPending = false;
             if (state.terminalRunner != null) {
-                state.terminalRunner.launchExternalTerminal(
-                        doChroot, state.currentWorkingDirectory);
+                state.terminalRunner.launchExternalTerminal(doChroot);
             } else {
                 setStatus(doChroot ? "SYS_EXEC: CHROOT_REQUESTED"
                                    : "SYS_EXEC: TERMINAL_REQUESTED");
@@ -488,7 +519,7 @@ public class Keyboard
         }
 
         // ── NUMPAD GALLERY / VISIBILITY ───────────────────────────────────────
-        boolean isPadActive = !state.isCapsLockActive || !state.isNumLockActive;
+        boolean isPadActive = !state.isNumLockActive || !state.isCalculatorEnabled;
 
         if (!isPadActive) {
             if (index == 86) { if (state.imageViewer != null) state.imageViewer.cycleGallery(-1); return; }
@@ -575,39 +606,85 @@ public class Keyboard
         processTyping(index, labels);
     }
 
-    // ── EXTENSION BUTTONS ─────────────────────────────────────────────────────
+    // ── EXTENSION BUTTONS & MODULAR MOUNTING ──────────────────────────────────
 
     private void handleExtensionButton(int index) 
     {
-        switch (index) {
-            case 107: launchOptionalModule("modular.Update");   break;
-            case 108: openScriptsFolderNative();               break;
-            case 109: launchOptionalModule("modular.LLMs");    break;
-            case 110: launchOptionalModule("modular.Terminal"); break;
-            case 111: launchOptionalModule("modular.Game");    break;
-            case 112: launchOptionalModule("modular.App");     break;
-            default:  setStatus("SYS_EXT: UNKNOWN");
+        launchOptionalModule(index);
+    }
+
+    private void launchOptionalModule(int buttonIndex) {
+        String target = resolveModuleTarget(buttonIndex);
+        
+        if (target.equals("[NATIVE_DIR]")) {
+            openScriptsFolderNative();
+            return;
+        }
+
+        try {
+            Class<?> cls;
+            boolean isCompiledOS = isRunningFromJar();
+
+            // ── CHASSIS AWARENESS ROUTING ──
+            if (!isCompiledOS && target.endsWith(".jar")) {
+                target = "modular." + target.replace(".jar", "");
+                if (state.chatHistory != null) {
+                    state.chatHistory.appendSystem("DEV_MODE: Remapped [" + target + ".jar] to native class [" + target + "]");
+                }
+            }
+
+            // ── USB PLUG & PLAY MOUNTING ──
+            if (isCompiledOS && target.endsWith(".jar")) {
+                File jarFile = new File("modular/" + target);
+                if (!jarFile.exists()) throw new FileNotFoundException("Missing Expansion Drive: " + target);
+                
+                URLClassLoader child = new URLClassLoader(new URL[]{jarFile.toURI().toURL()}, this.getClass().getClassLoader());
+                
+                String expectedClassName = "modular." + target.replace(".jar", ""); 
+                cls = Class.forName(expectedClassName, true, child);
+            } else {
+                cls = Class.forName(target);
+            }
+
+            // Standard Boot Sequence
+            java.lang.reflect.Constructor<?> ctor = cls.getConstructor(system.MatrixState.class);
+            Object module = ctor.newInstance(state);
+            java.lang.reflect.Method launch = cls.getMethod("launch");
+            launch.invoke(module);
+            
+            setStatus("SYS_MODULE: " + target + " ONLINE");
+
+        } catch (Exception e) {
+            // HARDWARE FAULT LOGGING
+            if (state.chatHistory != null) {
+                state.chatHistory.logModularCrash("Boot Failure: " + target, e);
+            }
+            setStatus("SYS_MODULE: FAULT [" + buttonIndex + "]");
         }
     }
 
-    private void launchOptionalModule(String className) 
-    {
+    private String resolveModuleTarget(int buttonIndex) {
+        File configFile = new File("modular/matrix_modules.cfg");
+        String defaultTarget = "modular.Unknown";
+
+        // Fallbacks if the config file gets deleted
+        switch (buttonIndex) {
+            case 107: defaultTarget = "modular.Update"; break;
+            case 108: defaultTarget = "[NATIVE_DIR]"; break;
+            case 109: defaultTarget = "modular.LLMs"; break;
+            case 110: defaultTarget = "modular.Terminal"; break;
+            case 111: defaultTarget = "modular.game.IceSandbox"; break;
+            case 112: defaultTarget = "modular.App"; break;
+        }
+
+        if (!configFile.exists()) return defaultTarget;
+
         try {
-            Class<?> cls         = Class.forName(className);
-            Constructor<?> ctor  = cls.getConstructor(MatrixState.class);
-            Object module        = ctor.newInstance(state);
-            Method launch        = cls.getMethod("launch");
-            launch.invoke(module);
-            setStatus("SYS_MODULE: " + className + " LAUNCHED");
-        } catch (ClassNotFoundException e) {
-            if (state.chatHistory != null)
-                state.chatHistory.appendError("MODULE_NOT_INSTALLED: " + className);
-            setStatus("SYS_MODULE: MISSING");
+            Properties props = new Properties();
+            props.load(Files.newInputStream(configFile.toPath()));
+            return props.getProperty("BTN_" + buttonIndex, defaultTarget);
         } catch (Exception e) {
-            if (state.chatHistory != null)
-                state.chatHistory.appendError(
-                        "MODULE_FAILED: " + className + " :: " + e.getMessage());
-            setStatus("SYS_MODULE: FAILED");
+            return defaultTarget;
         }
     }
 
@@ -675,7 +752,7 @@ public class Keyboard
         updateModifierVisuals();
     }
 
-private void toggleExecMode() 
+    private void toggleExecMode() 
     {
         boolean turningOn = !state.isSystemModeActive;
         state.isSystemModeActive = turningOn;
@@ -684,14 +761,18 @@ private void toggleExecMode()
         state.isCloudModeActive  = false;
         state.sessionModes.put(state.currentSession, turningOn ? 1 : 0);
         
-        // --- ADDED: Load appropriate log view ---
         if (state.chatHistory != null) {
             if (turningOn) {
-                // If turning ON Exec mode, load the specific exec log
-                java.io.File execLog = new java.io.File(state.sessionDirectories.get(state.currentSession), "exec_log.txt");
+                // CORRECTED LOG NAME AND AUTOGENERATION
+                File execLog = new File(state.sessionDirectories.get(state.currentSession), "exec_cmd.log");
+                try {
+                    if (!execLog.exists()) {
+                        execLog.getParentFile().mkdirs();
+                        execLog.createNewFile();
+                    }
+                } catch (Exception ignored) {}
                 state.chatHistory.loadLogFile(execLog);
             } else {
-                // If turning OFF Exec mode, revert back to the main session chat log
                 if (state.uiWindow != null) state.uiWindow.loadSession(state.currentSession);
             }
         }
@@ -715,12 +796,11 @@ private void toggleExecMode()
             state.uiWindow.stopGoddessAPI(state.currentSession);
         }
 
-        // AI Mode generally shares the main chat log, so we just reload the standard session
         if (state.uiWindow != null) state.uiWindow.loadSession(state.currentSession);
         updateModifierVisuals();
     }
 
-    private void toggleScriptMode() 
+private void toggleScriptMode() 
     {
         boolean turningOn = !state.isScriptModeActive;
         state.isScriptModeActive = turningOn;
@@ -729,14 +809,18 @@ private void toggleExecMode()
         state.isCloudModeActive  = false;
         state.sessionModes.put(state.currentSession, turningOn ? 3 : 0);
         
-        // --- ADDED: Load appropriate log view ---
         if (state.chatHistory != null) {
             if (turningOn) {
-                // If turning ON Script mode, load the specific script log
-                java.io.File scriptLog = new java.io.File(state.sessionDirectories.get(state.currentSession), "script_log.txt");
+                // CORRECTED LOG NAME AND AUTOGENERATION
+                File scriptLog = new File(state.sessionDirectories.get(state.currentSession), "scrpt_cmd.log");
+                try {
+                    if (!scriptLog.exists()) {
+                        scriptLog.getParentFile().mkdirs();
+                        scriptLog.createNewFile();
+                    }
+                } catch (Exception ignored) {}
                 state.chatHistory.loadLogFile(scriptLog);
             } else {
-                // If turning OFF Script mode, revert back to the main session chat log
                 if (state.uiWindow != null) state.uiWindow.loadSession(state.currentSession);
             }
         }
@@ -783,7 +867,7 @@ private void toggleExecMode()
         String std = labels[0];
         String sft = labels[1];
 
-        boolean isPadActive = !state.isCapsLockActive || !state.isNumLockActive;
+        boolean isPadActive = !state.isNumLockActive || !state.isCalculatorEnabled;
         if (index >= 83 && index <= 100 && !isPadActive) return;
 
         boolean processed = false;
@@ -823,6 +907,10 @@ private void toggleExecMode()
                 boolean effShift = isInvertedIndex(index)
                         ? !state.isShiftPending
                         :  state.isShiftPending;
+                // Hardwire Numpad digits (89-99) to bypass the shift void so numbers never go silent
+                if (index >= 83 && index <= 84 || index >= 86 && index <= 87 || index >= 89 && index <= 100) {
+                    effShift = false;
+                }
 
                 String chr = (index >= 2 && index <= 13)
                         ? (state.isFnPending ? sft : std)
@@ -840,19 +928,8 @@ private void toggleExecMode()
         updateModifierVisuals();
     }
 
-    /**
-     * Routes ENTER based on current mode.
-     *
-     * Priority:
-     *   1. CLOUD mode  → LLMs.sendCloudPrompt()  (early return)
-     *   2. AI mode     → API stdin pipe            (early return)
-     *   3. EXEC/SCRIPT → process stdin pipe        (early return)
-     *   4. /file cmd   → imageViewer.loadLocalHTML (early return)
-     *   5. Default     → shell/script/chat dispatch
-     */
     private void handleEnter(String cur) 
     {
-        // ── 1. CLOUD MODE ─────────────────────────────────────────────────────
         if (state.isCloudModeActive) {
             if (state.llmBridge instanceof modular.LLMs) {
                 ((modular.LLMs) state.llmBridge).sendCloudPrompt(cur);
@@ -865,7 +942,6 @@ private void toggleExecMode()
             return;
         }
 
-        // ── 2. AI MODE → API stdin ────────────────────────────────────────────
         Process apiProcess = state.apiProcessMap.get(state.currentSession);
         java.io.PrintWriter apiStdin = state.apiStdinMap.get(state.currentSession);
 
@@ -884,7 +960,6 @@ private void toggleExecMode()
             return;
         }
 
-        // ── 3. EXEC / SCRIPT → process stdin ─────────────────────────────────
         SessionProcess sp = state.processMap.get(state.currentSession);
 
         if ((state.isSystemModeActive || state.isScriptModeActive)
@@ -898,7 +973,6 @@ private void toggleExecMode()
             return;
         }
 
-        // ── 4. /file COMMAND ──────────────────────────────────────────────────
         if (cur.startsWith("/file ") && state.imageViewer != null) {
             state.imageViewer.loadLocalHTML(cur.substring(6).trim());
             if (state.chatHistory != null) state.chatHistory.clearTypingBuffer();
@@ -906,7 +980,6 @@ private void toggleExecMode()
             return;
         }
 
-        // ── 5. DEFAULT DISPATCH ───────────────────────────────────────────────
         if (!state.isCalculatorEnabled && state.isSystemModeActive
                 && state.terminalRunner != null) {
             state.terminalRunner.executeShellCommand(cur);
@@ -944,14 +1017,18 @@ private void toggleExecMode()
             String[] pair = dualKeyMap.get(id);
             if (pair == null) continue;
 
+            // Calculate exact pixel sizes based on the current window scale
+            int primarySz = Math.max((int)(7 * currentScale), (int)(6 * currentScale));
+            int subSz = Math.max((int)(6 * currentScale), (int)(5 * currentScale));
+
             if (id >= 101 && id <= 112) {
-                btn.setText("<html><center><font size='1' color='white'>"
-                        + pair[0] + "</font></center></html>");
+                btn.setText("<html><center><span style='font-size:" + primarySz + "px; color:white;'>"
+                        + pair[0] + "</span></center></html>");
             } else {
-                btn.setText("<html><center><font size='1' color='gray'>"
+                btn.setText("<html><center><span style='font-size:" + subSz + "px; color:gray;'>"
                         + pair[1]
-                        + "</font><br><font size='1' color='white'>"
-                        + pair[0] + "</font></center></html>");
+                        + "</span><br><span style='font-size:" + primarySz + "px; color:white;'>"
+                        + pair[0] + "</span></center></html>");
             }
         }
 

@@ -154,56 +154,55 @@ public class UIWindow extends JFrame {
     }
 
     private void buildUiOptionMenu() {
-        resCombo = createDarkComboBox(new String[]{
-                "1080p",
-                "720p",
-                "4K"
-        });
-
-        resCombo.setSelectedItem("720p"); //To Sync the UI option to 720p at boot
-
-        refreshCombo = createDarkComboBox(new String[]{
-                "Auto",
-                "60Hz",
-                "120Hz",
-                "144Hz",
-                "160Hz",
-                "166Hz",
-                "240Hz"
-        });
-
-        resCombo.addActionListener(e -> {
-            String selected = (String) resCombo.getSelectedItem();
-
-            if (selected != null) {
-                applyWindowSize(selected);
-                if (chatHistory != null)
-                {
-                    chatHistory.appendSystem("RESOLUTION_MODE_CHANGED: " + selected);
-                }
-            }
-        });
-
-        refreshCombo.addActionListener(e -> {
-            String selected = (String) refreshCombo.getSelectedItem();
-
-            if (selected != null) {
-                imageViewer.updateRefreshRate(selected);
-            }
-        });
-
         uiMenu = new JPopupMenu();
         uiMenu.setBackground(MatrixConfig.KEY_BG);
         uiMenu.setBorder(new LineBorder(new Color(157, 80, 187, 80), 1));
 
-        JPanel menuPanel = new JPanel(new GridLayout(2, 1, 0, 5));
-        menuPanel.setBackground(MatrixConfig.KEY_BG);
-        menuPanel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
-        menuPanel.add(resCombo);
-        menuPanel.add(refreshCombo);
+        // ── RESOLUTION CASCADING MENU ─────────────────────────────────────────
+        JMenu resMenu = new JMenu("RESOLUTION ► ");
+        resMenu.setForeground(MatrixConfig.GODDESS_GOLD);
+        resMenu.setFont(new Font("Monospaced", Font.PLAIN, 11));
+        resMenu.getPopupMenu().setBackground(MatrixConfig.KEY_BG);
+        resMenu.getPopupMenu().setBorder(new LineBorder(new Color(157, 80, 187, 80), 1));
 
-        uiMenu.add(menuPanel);
+        String[] resOptions = {"1080p", "720p", "4K"};
+        for (String res : resOptions) {
+            JMenuItem item = new JMenuItem(res);
+            item.setBackground(MatrixConfig.KEY_BG);
+            item.setForeground(MatrixConfig.TEXT_COLOR);
+            item.setFont(new Font("Monospaced", Font.PLAIN, 11));
+            item.addActionListener(e -> {
+                applyWindowSize(res);
+                if (chatHistory != null) {
+                    chatHistory.appendSystem("RESOLUTION_MODE_CHANGED: " + res);
+                }
+            });
+            resMenu.add(item);
+        }
 
+        // ── REFRESH RATE CASCADING MENU ───────────────────────────────────────
+        JMenu refreshMenu = new JMenu("REFRESH_RATE ► ");
+        refreshMenu.setForeground(MatrixConfig.GODDESS_GOLD);
+        refreshMenu.setFont(new Font("Monospaced", Font.PLAIN, 11));
+        refreshMenu.getPopupMenu().setBackground(MatrixConfig.KEY_BG);
+        refreshMenu.getPopupMenu().setBorder(new LineBorder(new Color(157, 80, 187, 80), 1));
+
+        String[] refOptions = {"Auto", "60Hz", "120Hz", "144Hz", "160Hz", "166Hz", "240Hz"};
+        for (String ref : refOptions) {
+            JMenuItem item = new JMenuItem(ref);
+            item.setBackground(MatrixConfig.KEY_BG);
+            item.setForeground(MatrixConfig.TEXT_COLOR);
+            item.setFont(new Font("Monospaced", Font.PLAIN, 11));
+            item.addActionListener(e -> {
+                imageViewer.updateRefreshRate(ref);
+            });
+            refreshMenu.add(item);
+        }
+
+        uiMenu.add(resMenu);
+        uiMenu.add(refreshMenu);
+
+        // ── TRIGGER BUTTON ────────────────────────────────────────────────────
         uiOptionBtn = new JButton("<ui_option()>");
         uiOptionBtn.setBackground(MatrixConfig.BG_DARK);
         uiOptionBtn.setForeground(MatrixConfig.TEXT_COLOR);
@@ -219,14 +218,11 @@ public class UIWindow extends JFrame {
 
         uiMenu.addPopupMenuListener(new javax.swing.event.PopupMenuListener() {
             @Override
-            public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent e) {
-            }
-
+            public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent e) {}
             @Override
             public void popupMenuWillBecomeInvisible(javax.swing.event.PopupMenuEvent e) {
                 uiOptionBtn.setForeground(MatrixConfig.TEXT_COLOR);
             }
-
             @Override
             public void popupMenuCanceled(javax.swing.event.PopupMenuEvent e) {
                 uiOptionBtn.setForeground(MatrixConfig.TEXT_COLOR);
@@ -245,20 +241,47 @@ public class UIWindow extends JFrame {
     }
 
     private void applyWindowSize(String mode) {
+        float scale = 1.0f;
         switch (mode) {
             case "1080p":
                 setSize(1450, 960);
+                scale = 1.35f;
                 break;
 
             case "4K":
                 setSize(1800, 1100);
+                scale = 1.8f;
                 break;
 
             case "720p":
             default:
                 setSize(1100, 760);
+                scale = 1.0f;
                 break;
         }
+        // Sets position ui after resize
+        setLocationRelativeTo(null);
+
+        // Broadcast the scale factor to all subsystems
+        if (keyboard != null) keyboard.applyScale(scale);
+        if (chatHistory != null) chatHistory.applyScale(scale);
+        if (imageViewer != null) imageViewer.applyScale(scale);
+
+        // Scale the main UIWindow HUD text
+        titleLabel.setFont(new Font("Inter", Font.BOLD, (int)(20 * scale)));
+        subtitleLabel.setFont(new Font("Monospaced", Font.PLAIN, (int)(10 * scale)));
+        state.statusLabel.setFont(new Font("Monospaced", Font.PLAIN, (int)(12 * scale)));
+        state.modifierLabel.setFont(new Font("Monospaced", Font.PLAIN, (int)(12 * scale)));
+        state.aiStatusLabel.setFont(new Font("Monospaced", Font.BOLD, (int)(12 * scale)));
+        uiOptionBtn.setFont(new Font("Monospaced", Font.PLAIN, (int)(11 * scale)));
+
+        SwingUtilities.invokeLater(() -> {
+            if (matrixPanel != null) { matrixPanel.revalidate(); matrixPanel.repaint(); }
+            if (headerPanel != null) { headerPanel.revalidate(); headerPanel.repaint(); }
+            if (footerPanel != null) { footerPanel.revalidate(); footerPanel.repaint(); }
+            revalidate();
+            repaint();
+        });
 
         SwingUtilities.invokeLater(() -> 
         {

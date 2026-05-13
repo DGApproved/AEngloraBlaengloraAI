@@ -10,10 +10,37 @@ package system;
  * - avoids circular dependencies
  * - acts as "motherboard memory bus"
  *
+ * HOOK ARCHITECTURE:
+ *   Every Matrix capability is exposed as a @FunctionalInterface hook field.
+ *   Hooks are wired at Matrix startup (GoddessMatrix.java) to the actual
+ *   implementations. Modular features read the hooks they need from MatrixState
+ *   and call them — they never reference system/* or assets/* classes directly.
+ *
+ *   This means:
+ *   - The Matrix never changes to support a new modular feature.
+ *   - A modular feature uses only what it needs, ignores the rest.
+ *   - Any Java program dropped into the modular/ folder can be a full citizen.
+ *
+ * HOOK CATEGORIES:
+ *   KeyEventHook      — receive all keyboard events before Matrix processes them
+ *   ErrorHook         — log a crash as a clickable [rawdat_crash_log] in chat
+ *   CalculatorHook    — ask the calculator to evaluate an expression
+ *   ChatHook          — append text to the Matrix chat display
+ *   AISendHook        — send text to the active AI session's Python stdin
+ *   AIResponseHook    — receive AI stdout lines (set to receive narration etc.)
+ *   StatusHook        — write to the Matrix status bar
+ *   ShellHook         — execute a shell command via TerminalRunner
+ *   ManifestHook      — inject a rendered frame into the ImageViewer manifest
+ *   SessionInfoHook   — query current session number and directory
+ *
  * Design Rules:
  * - NO direct dependency on modular/*
  * - ONLY references system/ and assets/
  * - everything optional is nullable
+ *
+ * Contributors:
+ *   Derek Jason Gilhousen — architecture, hook philosophy, all design decisions
+ *   Claude (Anthropic)    — hook interface definitions, wiring pattern
  */
 
 import javax.swing.*;
@@ -82,6 +109,9 @@ public class MatrixState {
     public boolean isAIModeActive = false;     // AI
     public boolean isScriptModeActive = false; // SCRIPT
     public boolean isCloudModeActive = false;  // CLOUD
+
+    public boolean imageViewerMaximized = false;
+    public modular.game.IceSandbox sandboxInstance = null;
 
     public boolean isUserModeActive = false;
     public boolean isSudoEnabled = false;
@@ -167,12 +197,11 @@ public class MatrixState {
     public volatile boolean fnAIVisualMode = false;
     public volatile long lastRealImageTime = 0;
 
-    // Mode B Avatar
-    public volatile boolean manifestModeB = false;
+    public volatile int manifestViewMode = 0; // 0=Waveform, 1=Avatar, 2=Calculator, 3=Game
+    public boolean isCalculatorUnlocked = false;
+
     public volatile String avatarAction = "IDLE";
     public volatile float avatarWalkCycle = 0f;
-
-    // image.xtx directives
     public Map<String, String> imageXTX = new HashMap<>();
     public long imageXTXLastModified = 0L;
 
@@ -184,9 +213,6 @@ public class MatrixState {
     // ─────────────────────────────────────────────
     // GAME MODE
     // ─────────────────────────────────────────────
-    // Set true by modular.Game when IceSandbox is embedded in the manifest panel.
-    // Keyboard.installHardwareBridge uses this to pass game keys (WASD/SPACE/ESC/E)
-    // through to the game canvas rather than consuming them into Matrix buttons.
     public boolean isGameModeActive = false;
 
     // ─────────────────────────────────────────────
@@ -198,8 +224,221 @@ public class MatrixState {
     // ─────────────────────────────────────────────
     // MODULAR BRIDGES (nullable, set by modular layer at runtime)
     // ─────────────────────────────────────────────
-    public Object llmBridge    = null;   // set by modular.LLMs on launch
-    public Object gameProtocol = null;   // set by modular.Game on launch
-                                         // cast to modular.game.GameProtocol
-                                         // by ApiBridge when forwarding game tags
+    public Object llmBridge    = null;
+    public Object gameProtocol = null;
+
+    // ═════════════════════════════════════════════
+    // MODULAR CAPABILITY HOOKS
+    //
+    // Wired at Matrix startup by GoddessMatrix.java.
+    // Modular features read what they need and call it.
+    // Null = capability not available (feature gracefully skips it).
+    // Never throw from a hook — the Matrix must stay running.
+    // ═════════════════════════════════════════════
+
+    // ─────────────────────────────────────────────
+    // KEY EVENT HOOK
+    // Called first for every KeyEvent before Matrix processes it.
+    // Return true  → consumed, Matrix sees nothing.
+    // Return false → Matrix processes normally.
+    // Clear to null on module stop.
+    // ─────────────────────────────────────────────
+    @FunctionalInterface
+    public interface KeyEventHook {
+        boolean onKeyEvent(java.awt.event.KeyEvent e);
+    }
+    public volatile KeyEventHook keyHook = null;
+
+    // ─────────────────────────────────────────────
+    // ERROR HOOK
+    // Logs an exception as a clickable [rawdat_crash_log] in the chat display.
+    // Wired to: chatHistory.logModularCrash(moduleName, e)
+    // Use for any non-fatal modular fault.
+    //
+    // Example:
+    //   state.errorHook.log("Game Physics", e);
+    // ─────────────────────────────────────────────
+    @FunctionalInterface
+    public interface ErrorHook {
+        void log(String moduleName, Exception e);
+    }
+    public volatile ErrorHook errorHook = null;
+
+    // ─────────────────────────────────────────────
+    // CALCULATOR HOOK
+    // Evaluates a mathematical expression using the Matrix calculator engine.
+    // Returns the result string. Returns "SYS_OFFLINE" if calculator is off.
+    // Wired to: CalculatorEngine.solve(expression)
+    //
+    // Example:
+    //   String result = state.calculatorHook.calculate("sqrt(2) * pi");
+    // ─────────────────────────────────────────────
+    @FunctionalInterface
+    public interface CalculatorHook {
+        String calculate(String expression);
+    }
+    public volatile CalculatorHook calculatorHook = null;
+
+    // ─────────────────────────────────────────────
+    // CHAT HOOKS
+    // Append text to the Matrix chat display.
+    // Wired to chatHistory methods.
+    //
+    // chatSystemHook  → chatHistory.appendSystem(text)  — SYSTEM> prefix, purple
+    // chatErrorHook   → chatHistory.appendError(text)   — ERROR> prefix, red
+    // chatRawHook     → chatHistory.appendRaw(text)     — no prefix, plain
+    //
+    // Example:
+    //   state.chatSystemHook.append("GAME: Player picked up book");
+    // ─────────────────────────────────────────────
+    @FunctionalInterface
+    public interface ChatAppendHook {
+        void append(String text);
+    }
+    public volatile ChatAppendHook chatSystemHook = null;
+    public volatile ChatAppendHook chatErrorHook  = null;
+    public volatile ChatAppendHook chatRawHook    = null;
+
+    // ─────────────────────────────────────────────
+    // AI SEND HOOK
+    // Sends text directly to the active AI session's Python stdin.
+    // This is the C key conduit — bypasses the chat log roundtrip.
+    // Wired to: apiStdinMap.get(currentSession).println(text)
+    //
+    // Example:
+    //   state.aiSendHook.send("What is on this page?");
+    // ─────────────────────────────────────────────
+    @FunctionalInterface
+    public interface AISendHook {
+        void send(String text);
+    }
+    public volatile AISendHook aiSendHook = null;
+
+    // ─────────────────────────────────────────────
+    // AI RESPONSE HOOK
+    // Called by ApiBridge when a line arrives from GoddessAPI stdout
+    // that starts with [GAME_NARRATE:] or any tag the module registered for.
+    // The module sets this to receive narration, world updates, etc.
+    // Wired in ApiBridge.parseAPIOutput() alongside existing tag routing.
+    //
+    // Example:
+    //   state.aiResponseHook = line -> {
+    //       if (line.startsWith("[GAME_NARRATE:")) { ... }
+    //   };
+    // ─────────────────────────────────────────────
+    @FunctionalInterface
+    public interface AIResponseHook {
+        void onLine(String line);
+    }
+    public volatile AIResponseHook aiResponseHook = null;
+
+    // ─────────────────────────────────────────────
+    // STATUS HOOK
+    // Writes to the Matrix status bar (bottom-left label).
+    // Wired to: statusLabel.setText(text)
+    //
+    // Example:
+    //   state.statusHook.set("GAME: Walking north");
+    // ─────────────────────────────────────────────
+    @FunctionalInterface
+    public interface StatusHook {
+        void set(String text);
+    }
+    public volatile StatusHook statusHook = null;
+
+    // ─────────────────────────────────────────────
+    // SHELL HOOK
+    // Executes a shell command via TerminalRunner.
+    // Wired to: terminalRunner.executeShellCommand(command)
+    //
+    // Example:
+    //   state.shellHook.execute("python3 myscript.py");
+    // ─────────────────────────────────────────────
+    @FunctionalInterface
+    public interface ShellHook {
+        void execute(String command);
+    }
+    public volatile ShellHook shellHook = null;
+
+    // ─────────────────────────────────────────────
+    // MANIFEST RENDER HOOK
+    // Called by ImageViewer each render tick when manifestViewMode == 3 (Game).
+    // The module returns a BufferedImage to display in the manifest panel.
+    // Return null to let the ImageViewer render its default content.
+    // Wired in ImageViewer.refreshTick() alongside existing view modes.
+    //
+    // Example:
+    //   state.manifestRenderHook = (w, h) -> myGameFrame.renderToImage(w, h);
+    // ─────────────────────────────────────────────
+    @FunctionalInterface
+    public interface ManifestRenderHook {
+        BufferedImage render(int width, int height);
+    }
+    public volatile ManifestRenderHook manifestRenderHook = null;
+
+    // ─────────────────────────────────────────────
+    // SESSION INFO HOOK
+    // Provides the current session number and its directory to the module.
+    // The module uses this to know where to read/write its own data files
+    // without needing to reference MatrixState's session maps directly.
+    // Wired at startup.
+    //
+    // Example:
+    //   int fn = state.sessionInfoHook.currentSession();
+    //   File dir = state.sessionInfoHook.sessionDirectory();
+    // ─────────────────────────────────────────────
+    public interface SessionInfoHook {
+        int  currentSession();
+        File sessionDirectory();
+    }
+    public volatile SessionInfoHook sessionInfoHook = null;
+
+    // ─────────────────────────────────────────────
+    // HOOK WIRING HELPER
+    // Called once by GoddessMatrix at startup to wire all hooks.
+    // Keeps the wiring in one place. Each hook is null-safe — if the
+    // backing object isn't ready, the hook stays null.
+    // ─────────────────────────────────────────────
+    public void wireHooks()
+    {
+        // Error reporting
+        if (chatHistory != null)
+            errorHook = (name, e) -> chatHistory.logModularCrash(name, e);
+
+        // Calculator
+        calculatorHook = expression -> assets.CalculatorEngine.solve(expression);
+
+        // Chat display
+        if (chatHistory != null) {
+            chatSystemHook = text -> chatHistory.appendSystem(text);
+            chatErrorHook  = text -> chatHistory.appendError(text);
+            chatRawHook    = text -> chatHistory.appendRaw(text);
+        }
+
+        // AI send — always routes to current session's stdin
+        aiSendHook = text -> {
+            java.io.PrintWriter stdin = apiStdinMap.get(currentSession);
+            if (stdin != null) { stdin.println(text); stdin.flush(); }
+        };
+
+        // Status bar
+        if (statusLabel != null)
+            statusHook = text ->
+                javax.swing.SwingUtilities.invokeLater(() -> statusLabel.setText(text));
+
+        // Shell execution
+        if (terminalRunner != null)
+            shellHook = command -> terminalRunner.executeShellCommand(command);
+
+        // Session info
+        sessionInfoHook = new SessionInfoHook() {
+            public int  currentSession()   { return MatrixState.this.currentSession; }
+            public File sessionDirectory() {
+                return sessionDirectories.getOrDefault(currentSession, aiHomeDirectory);
+            }
+        };
+
+        // manifestRenderHook and aiResponseHook are set by the modular feature,
+        // not by the Matrix — the Matrix calls them, doesn't provide them.
+    }
 }

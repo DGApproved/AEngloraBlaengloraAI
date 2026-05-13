@@ -61,10 +61,12 @@ public class ChatHistory
         chatHistory.setContentType("text/html");
         chatHistory.setEditable(false);
         chatHistory.setBackground(Color.BLACK);
+        chatHistory.putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, Boolean.TRUE);
+        chatHistory.setFont(new Font("Monospaced", Font.PLAIN, 13));
         
         HTMLEditorKit kit = new HTMLEditorKit();
         StyleSheet styleSheet = kit.getStyleSheet();
-        styleSheet.addRule("body { color: white; font-family: monospace; font-size: 13pt; background-color: black; margin: 4px; }");
+        styleSheet.addRule("body { color: white; font-family: monospace; background-color: black; margin: 4px; }");
         styleSheet.addRule("a { color: #facd68; text-decoration: none; }");
         chatHistory.setEditorKit(kit);
         chatHistory.setDocument(kit.createDefaultDocument());
@@ -127,9 +129,24 @@ public class ChatHistory
         state.chatHistory = this;
     }
 
+    public void applyScale(float scale) {
+        int scaledChatSize = Math.max(10, (int)(13 * scale));
+        int scaledTypeSize = Math.max(10, (int)(14 * scale));
+
+        chatHistory.setFont(new Font("Monospaced", Font.PLAIN, scaledChatSize));
+        typingBuffer.setFont(new Font("Monospaced", Font.PLAIN, scaledTypeSize));
+        
+        // Update the typing buffer attributes so new keystrokes match the scale
+        javax.swing.text.SimpleAttributeSet attr = new javax.swing.text.SimpleAttributeSet();
+        javax.swing.text.StyleConstants.setForeground(attr, Color.WHITE);
+        javax.swing.text.StyleConstants.setFontFamily(attr, "Monospaced");
+        javax.swing.text.StyleConstants.setFontSize(attr, scaledTypeSize);
+        typingBuffer.setCharacterAttributes(attr, true);
+    }
+    
     public void loadLogFile(File logFile) {
         if (logFile == null || !logFile.exists()) {
-            appendToChat("[System] Log file not found or empty: " + (logFile != null ? logFile.getName() : "null"));
+            appendSystem("Log file not found or empty: " + (logFile != null ? logFile.getName() : "null"));
             return;
         }
 
@@ -141,16 +158,17 @@ public class ChatHistory
 
                 // Transition the UI on the Event Dispatch Thread
                 SwingUtilities.invokeLater(() -> {
-                    // Safely clear the visual canvas (this does not affect the file)
-                    chatHistory.setText(""); 
+                    // Safely clear the visual canvas using your built-in method
+                    clearChat(); 
                 
-                    // Inject the newly read content
-                    appendHtml(content);
+                    // Inject the newly read content.
+                    // Using appendRaw ensures < > and & are safely escaped, and \n becomes <br>
+                    appendRaw(content);
                 });
 
             } catch (Exception e) {
                 SwingUtilities.invokeLater(() -> 
-                    appendToChat("[System Error] Could not read log file: " + e.getMessage())
+                    appendError("Could not read log file: " + e.getMessage())
                 );
             }
         }).start();
@@ -207,6 +225,30 @@ public class ChatHistory
     {
         appendHtml("<span style='color: #ef4444;'>ERROR&gt; " + text + "</span><br>");
         cacheChatData("ERROR> " + text);
+    }
+
+    // ── MODULAR CRASH HANDLER ─────────────────────────────────────────────────
+    public void logModularCrash(String moduleName, Exception e) {
+        String header = "MODULE_CRASH: " + moduleName;
+        appendError(header);
+
+        // Convert the Java stack trace into a string
+        java.io.StringWriter sw = new java.io.StringWriter();
+        e.printStackTrace(new java.io.PrintWriter(sw));
+        String stackTrace = sw.toString();
+
+        // Inject the stack trace into the [rawdat] memory cache
+        int id = rawDataCounter++;
+        rawDataCache.put(String.valueOf(id), stackTrace);
+        tagLabelCache.put(String.valueOf(id), "[rawdat_crash_log]");
+        
+        // Print the clickable link to the UI
+        appendHtml("<div id='raw_" + id + "'><a href='rawdat:" + id + "'>[rawdat_crash_log]</a></div>");
+
+        // Ensure it gets saved to the persistent session log
+        if (!state.isCloudModeActive) {
+            pendingLogs.add("ERROR> " + header + "\n" + stackTrace + "\n");
+        }
     }
 
     public void appendChat(String speaker, String text) 

@@ -51,6 +51,32 @@ public class ImageViewer
     private String profileLine2 = "";
     private String profileLine3 = "";
 
+    // ── MODE C CALCULATOR CLICK AREAS ─────────────────────────────────────────
+    // Populated each time renderModeCGraphingFrame() runs.
+    // Checked by mouse click handler for function button insertion.
+    private static class CalcButton {
+        final java.awt.Rectangle bounds;
+        final String insert;
+        CalcButton(int x, int y, int w, int h, String ins)
+        { bounds = new java.awt.Rectangle(x, y, w, h); insert = ins; }
+    }
+    private final java.util.List<CalcButton> calcButtons = new java.util.ArrayList<>();
+    private java.awt.Rectangle graphExpandBounds  = null;
+    private java.awt.Rectangle graphRestoreBounds = null;
+    private boolean graphExpanded = false;
+
+    private float currentScale = 1.0f;
+
+    public void applyScale(float scale) {
+        this.currentScale = scale;
+        // Trigger a fake resize event to force the canvas to recalculate its new anchor points
+        if (imageManifest != null && imageManifest.getParent() != null) {
+            for (java.awt.event.ComponentListener cl : imageManifest.getParent().getComponentListeners()) {
+                cl.componentResized(null);
+            }
+        }
+    }
+
     public ImageViewer(MatrixState state) 
     {
         this.state = state;
@@ -83,6 +109,41 @@ public class ImageViewer
     {
         if (imageManifest == null) initialize();
         panel.add(imageManifest);
+
+        // ── DYNAMIC UI RESIZING HOOK ──────────────────────────────────────────
+        // Actively listens to the main window and recalculates UI boundaries
+        panel.addComponentListener(new java.awt.event.ComponentAdapter() {
+            @Override
+            public void componentResized(java.awt.event.ComponentEvent e) {
+                int pW = panel.getWidth();
+                int pH = panel.getHeight();
+
+                //Scale the base manifest dimensions
+                int manifestW = (int)(320 * currentScale);
+                int manifestH = (int)(240 * currentScale);
+
+                if (state.manifestState == 1) { 
+                    // Area Mode: Snaps to fill the entire window
+                    imageManifest.setBounds(0, 0, pW, pH);
+                } 
+                else if (graphExpanded) {
+                    // Expanded Graph Mode: Maintains the 35% / 65% split dynamically
+                    imageManifest.setBounds(0, (int)(pH * 0.35), pW, (int)(pH * 0.65));
+                } 
+                else if (state.manifestState == 0) {
+                    // Standard Manifest: Anchors securely to the top-right corner
+                    int anchorX = pW - manifestW - 20; // 320px width + 20px padding
+                    if (anchorX < 0) anchorX = 0; // Prevents clipping on tiny windows
+                    
+                    imageManifest.setBounds(anchorX, 10, manifestW, manifestH);
+                    originalManifestBounds = imageManifest.getBounds();
+                }
+                
+                // Force the renderer to redraw the traces and grids at the new scale
+                imageManifest.revalidate();
+                imageManifest.repaint();
+            }
+        });
     }
 
     // ── MANIFEST PAINTING ─────────────────────────────────────────────────────
@@ -166,6 +227,46 @@ public class ImageViewer
                             e.getX(), e.getY(), e.getButton(), e.getClickCount());
                 }
 
+                // ── MODE C CALCULATOR CLICK DETECTION ────────────────────────
+                if (state.isCalculatorEnabled && state.manifestViewMode == 2
+                        && e.getButton() == java.awt.event.MouseEvent.BUTTON1)
+                {
+                    int mx = e.getX(), my = e.getY();
+
+                    // RESTORE button when graph is expanded
+                    if (graphExpanded)
+                    {
+                        if (graphRestoreBounds != null
+                                && graphRestoreBounds.contains(mx, my))
+                        {
+                            collapseGraphMode();
+                            return;
+                        }
+                        return; // no other clicks in graph mode
+                    }
+
+                    // GRAPH expand button
+                    if (graphExpandBounds != null
+                            && graphExpandBounds.contains(mx, my))
+                    {
+                        expandGraphMode();
+                        return;
+                    }
+
+                    // Function buttons — insert into typing buffer
+                    for (CalcButton cb : calcButtons)
+                    {
+                        if (cb.bounds.contains(mx, my))
+                        {
+                            if (state.chatHistory != null)
+                                state.chatHistory.insertAtCaret(cb.insert);
+                            setStatus("SYS_CALC: " + cb.insert);
+                            if (imageManifest != null) imageManifest.repaint();
+                            return;
+                        }
+                    }
+                }
+
                 boolean doubleTrigger = e.getClickCount() == 2 || state.isAltPending;
 
                 if (state.manifestState == 0) {
@@ -224,8 +325,15 @@ public class ImageViewer
             imageManifest.setBounds(740, 10, 320, 240);
         }
 
-        state.manifestState   = 0;
-        state.isUserModeActive = false;
+        state.manifestState        = 0;
+        state.isUserModeActive     = false;
+        state.imageViewerMaximized = false;
+        // Hide game canvas on restore — user cycles back via right-click
+        if (state.isGameModeActive && state.sandboxInstance != null)
+        {
+            state.sandboxInstance.setVisible(false);
+            state.manifestViewMode = 0;
+        }
         setStatus("SYS_MANIFEST: RESTORED");
         imageManifest.repaint();
     }
@@ -258,15 +366,20 @@ public class ImageViewer
             imageManifest.setBounds(0, 0, root.getWidth(), root.getHeight());
         }
 
-        // Re-focus game canvas so keyboard input still reaches it
+        // Game cinematic: show canvas, set imageViewerMaximized, capture mouse
         if (state.isGameModeActive)
         {
+            state.imageViewerMaximized = true;
+            state.manifestViewMode     = 3;
             java.awt.Component[] children = imageManifest.getComponents();
             for (java.awt.Component c : children)
             {
                 if (c instanceof modular.game.IceSandbox)
                 {
+                    c.setVisible(true);
                     c.requestFocusInWindow();
+                    try { c.getClass().getMethod("captureMouse").invoke(c); }
+                    catch (Exception ignored) {}
                     break;
                 }
             }
@@ -277,13 +390,40 @@ public class ImageViewer
 
     private void handleManifestRightClick() 
     {
-        state.manifestModeB      = !state.manifestModeB;
-        state.lastRealImageTime  = 0; // let renderer start immediately
+        // View modes:
+        //   0 = MODE_A_WAVEFORM   — AI HUD (always available)
+        //   1 = MODE_B_AVATAR     — AI stick figure (always available)
+        //   2 = MODE_C_GRAPHING   — calculator (when calculator enabled)
+        //   3 = MODE_D_GAME       — game canvas (when game active)
+        //
+        // The game module is optional — only included in the cycle when running.
+        // Right-click [Game] button for fullscreen cinematic with mouse capture.
+        int maxViews = 2;
+        if (state.isCalculatorEnabled)  maxViews = 3;
+        if (state.isGameModeActive)      maxViews = 4;
 
-        setStatus(state.manifestModeB
-                ? "SYS_MANIFEST: MODE_B_AVATAR"
-                : "SYS_MANIFEST: MODE_A_WAVEFORM");
+        state.manifestViewMode = (state.manifestViewMode + 1) % maxViews;
+        state.lastRealImageTime = 0;
 
+        String modeName;
+        switch (state.manifestViewMode)
+        {
+            case 1:  modeName = "MODE_B_AVATAR";   break;
+            case 2:  modeName = "MODE_C_GRAPHING";  break;
+            case 3:  modeName = "MODE_D_GAME";      break;
+            default: modeName = "MODE_A_WAVEFORM";  break;
+        }
+
+        // Show or hide the game canvas based on whether game view is selected.
+        // The game keeps running either way — canvas visibility is presentation only.
+        if (state.sandboxInstance != null)
+        {
+            boolean showGame = (state.manifestViewMode == 3);
+            state.sandboxInstance.setVisible(showGame);
+            if (showGame) state.sandboxInstance.requestFocusInWindow();
+        }
+
+        setStatus("SYS_MANIFEST: " + modeName);
         imageManifest.repaint();
     }
 
@@ -325,16 +465,20 @@ public class ImageViewer
                         frameBuffer.write(0xD8);
                     } else if (inFrame) {
                         frameBuffer.write(cur);
-                        if (prev == 0xFF && cur == 0xD9) {
+                        if (prev == 0xFF && cur == 0xD9) 
+                        {
                             inFrame = false;
                             byte[] imgData = frameBuffer.toByteArray();
-                            BufferedImage frame =
-                                    ImageIO.read(new ByteArrayInputStream(imgData));
-                            if (frame != null) {
-                                state.activeBuffer       = frame;
-                                state.lastRealImageTime  = System.currentTimeMillis();
-                                if (imageManifest != null) imageManifest.repaint();
+                            BufferedImage frame = null;
+                            if (state.manifestViewMode == 1) {
+                                frame = renderModeBFrame();
+                            } else if (state.manifestViewMode == 2) {
+                                frame = renderModeCGraphingFrame();
+                            } else {
+                                frame = renderAIFrame();
                             }
+
+                            if (frame != null) state.activeBuffer = frame;
                         }
                     }
                     prev = cur;
@@ -454,10 +598,12 @@ public class ImageViewer
             state.lastLogicTick = now;
         }
 
-        // AI visual renderer
-        if (state.isAIModeActive
-                && !state.isHtmlStreamActive
-                && !state.isVideoStreamActive) {
+        // AI & Calculator visual renderer
+        boolean shouldRender = (state.isAIModeActive || state.isCalculatorEnabled) 
+                               && !state.isHtmlStreamActive 
+                               && !state.isVideoStreamActive;
+
+        if (shouldRender) {
 
             boolean holdExpired = (now - state.lastRealImageTime) >= MatrixConfig.IMAGE_HOLD_MS;
             boolean noBuffer    = state.activeBuffer == null;
@@ -468,9 +614,24 @@ public class ImageViewer
                     state.renderPhase -= (float)(Math.PI * 2);
                 }
 
-                BufferedImage frame = state.manifestModeB
-                        ? renderModeBFrame()
-                        : renderAIFrame();
+                BufferedImage frame = null;
+                if (state.manifestViewMode == 1) {
+                    frame = renderModeBFrame();
+                } else if (state.manifestViewMode == 2) {
+                    frame = renderModeCGraphingFrame();
+                } else if (state.manifestViewMode == 3 && state.manifestRenderHook != null) {
+                    // Mode 3: modular feature renders its own frame
+                    int fw = Math.max(1, imageManifest.getWidth());
+                    int fh = Math.max(1, imageManifest.getHeight());
+                    try { frame = state.manifestRenderHook.render(fw, fh); }
+                    catch (Exception e) {
+                        state.manifestRenderHook = null; // clear broken hook
+                        if (state.chatHistory != null)
+                            state.chatHistory.logModularCrash("ManifestRender", e);
+                    }
+                } else {
+                    frame = renderAIFrame();
+                }
 
                 if (frame != null) state.activeBuffer = frame;
             }
@@ -505,16 +666,19 @@ public class ImageViewer
         // Add game canvas as full-size child of the manifest panel
         imageManifest.setLayout(new java.awt.BorderLayout());
         imageManifest.add(gameCanvas, java.awt.BorderLayout.CENTER);
+
+        // Start hidden — game view is mode 3 in the right-click cycle.
+        // Right-clicking [Game] button enters cinematic (fullscreen + mouse capture).
+        // Right-clicking ImageViewer cycles to MODE_D_GAME to see game in manifest.
+        gameCanvas.setVisible(false);
+
         imageManifest.revalidate();
         imageManifest.repaint();
 
-        // Give the game canvas keyboard focus
-        gameCanvas.requestFocusInWindow();
-
-        // Flag so Keyboard dispatcher passes game keys through
+        // Flag so Keyboard dispatcher is aware game is running
         state.isGameModeActive = true;
 
-        setStatus("SYS_GAME: MANIFEST_ACTIVE — DBL-CLICK TO EXPAND");
+        setStatus("SYS_GAME: ACTIVE — R-CLICK [Game] = fullscreen | R-CLICK manifest = cycle views");
     }
 
     public void stopGameMode() 
@@ -532,6 +696,8 @@ public class ImageViewer
 
         state.isGameModeActive = false;
         state.activeBuffer     = null;
+        // Reset to waveform view — game slot (mode 3) is gone
+        if (state.manifestViewMode == 3) state.manifestViewMode = 0;
 
         setStatus("SYS_GAME: ENGINE_OFFLINE");
     }
@@ -775,6 +941,289 @@ public class ImageViewer
         } catch (Exception ignored) {
             profileLine1 = "PROFILE: READ ERROR";
         }
+    }
+
+    // ── MODE C: VIRTUAL GRAPHING ENGINE ───────────────────────────────────────
+    // Small area mode: shows all scientific function buttons (clickable).
+    // Expanded graph mode: shows live Cartesian plotting grid with curves.
+
+    private BufferedImage renderModeCGraphingFrame()
+    {
+        int W = Math.max(1, imageManifest != null ? imageManifest.getWidth()  : 320);
+        int H = Math.max(1, imageManifest != null ? imageManifest.getHeight() : 240);
+
+        BufferedImage img = new BufferedImage(W, H, BufferedImage.TYPE_INT_RGB);
+        Graphics2D    g   = img.createGraphics();
+
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                           RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                           RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+
+        // Background
+        g.setPaint(new GradientPaint(0, 0, new Color(5, 10, 15),
+                                     W, H, new Color(12, 18, 28)));
+        g.fillRect(0, 0, W, H);
+
+        // Cyberpunk Cartesian grid
+        g.setColor(new Color(157, 80, 187, 25));
+        g.setStroke(new BasicStroke(0.5f));
+        int gs = graphExpanded ? 40 : 20;
+        for (int x = W/2 % gs; x < W; x += gs) g.drawLine(x, 0, x, H);
+        for (int y = H/2 % gs; y < H; y += gs) g.drawLine(0, y, W, y);
+
+        // Axes
+        g.setColor(new Color(157, 80, 187, 80));
+        g.setStroke(new BasicStroke(1.2f));
+        g.drawLine(W/2, 0, W/2, H);
+        g.drawLine(0, H/2, W, H/2);
+
+        // ── HEADER ────────────────────────────────────────────────────────────
+        g.setPaint(new GradientPaint(0, 0, new Color(40, 15, 65, 220),
+                                     W, 0, new Color(15, 8, 30, 220)));
+        g.fillRect(0, 0, W, 22);
+        g.setFont(new Font("Monospaced", Font.BOLD, 10));
+        g.setColor(MatrixConfig.GODDESS_GOLD);
+        drawLeft(g, graphExpanded ? "GODDESS PLOTTER" : "EXTENDED CALC", 8, 15);
+        g.setColor(MatrixConfig.GODDESS_PURPLE);
+        drawRight(g, "SEED:29", W - 8, 15);
+
+        // ── EXPRESSION DISPLAY ────────────────────────────────────────────────
+        String curExpr = state.chatHistory != null
+                ? state.chatHistory.getTypingText() : "";
+        if (curExpr.length() > 30) curExpr = "…" + curExpr.substring(curExpr.length() - 30);
+        g.setColor(new Color(30, 15, 50, 200));
+        g.fillRoundRect(6, 24, W - 12, 16, 4, 4);
+        g.setColor(new Color(80, 220, 120, 200));
+        g.setFont(new Font("Monospaced", Font.PLAIN, 9));
+        drawLeft(g, curExpr.isEmpty() ? "enter expression..." : curExpr, 10, 35);
+
+        if (graphExpanded)
+        {
+            // ── GRAPHING MODE ─────────────────────────────────────────────────
+            int plotTop = 44;
+            int plotBot = H - 52;
+            boolean hasCustomExpr = !curExpr.isEmpty() && !curExpr.equals("enter expression...");
+
+            if (hasCustomExpr) 
+            {
+                // Expression trace (cyan) - Active Graph Focus
+                g.setColor(new Color(80, 210, 255, 180));
+                for (int x = 1; x < W; x++)
+                {
+                    int y0 = assets.CalculatorEngine.Graphing.evaluateExpressionY(
+                            curExpr, x - 1, W, plotBot - plotTop);
+                    int y1 = assets.CalculatorEngine.Graphing.evaluateExpressionY(
+                            curExpr, x, W, plotBot - plotTop);
+                    if (y0 == Integer.MIN_VALUE || y1 == Integer.MIN_VALUE) continue;
+                    y0 += plotTop; y1 += plotTop;
+                    if (y0 >= plotTop && y1 >= plotTop && y0 < plotBot && y1 < plotBot)
+                        g.drawLine(x - 1, y0, x, y1);
+                }
+            } 
+            else 
+            {
+                // Sine trace (gold) - Default Idle
+                g.setColor(MatrixConfig.GODDESS_GOLD);
+                g.setStroke(new BasicStroke(2f));
+                for (int x = 1; x < W; x++)
+                {
+                    int y0 = assets.CalculatorEngine.Graphing.calculateSineY(
+                            x - 1, W, plotBot - plotTop, state.renderPhase) + plotTop;
+                    int y1 = assets.CalculatorEngine.Graphing.calculateSineY(
+                            x, W, plotBot - plotTop, state.renderPhase) + plotTop;
+                    if (y0 >= plotTop && y1 >= plotTop && y0 < plotBot && y1 < plotBot)
+                        g.drawLine(x - 1, y0, x, y1);
+                }
+
+                // Parabola trace (green) - Default Idle
+                g.setColor(new Color(80, 220, 120, 160));
+                for (int x = 1; x < W; x++)
+                {
+                    int y0 = assets.CalculatorEngine.Graphing.calculateParabolaY(
+                            x - 1, W, plotBot - plotTop, state.renderPhase) + plotTop;
+                    int y1 = assets.CalculatorEngine.Graphing.calculateParabolaY(
+                            x, W, plotBot - plotTop, state.renderPhase) + plotTop;
+                    if (y0 >= plotTop && y1 >= plotTop && y0 < plotBot && y1 < plotBot)
+                        g.drawLine(x - 1, y0, x, y1);
+                }
+            }
+
+            // ── DYNAMIC LEGEND ────────────────────────────────────────────────
+            g.setFont(new Font("Monospaced", Font.PLAIN, 8));
+            int ly = plotBot + 10;
+            
+            if (hasCustomExpr) 
+            {
+                g.setColor(new Color(80, 210, 255));
+                String legStr = curExpr.length() > 25 ? curExpr.substring(0, 25) + "..." : curExpr;
+                drawLeft(g, "── y = " + legStr, 8, ly);
+            } 
+            else 
+            {
+                g.setColor(MatrixConfig.GODDESS_GOLD);
+                drawLeft(g, "── sin(x+θ)", 8, ly);
+                g.setColor(new Color(80, 220, 120));
+                drawLeft(g, "── x²", 90, ly);
+            }
+
+            // RESTORE button
+            int rbW = 80, rbH = 18;
+            int rbX = W - rbW - 6, rbY = H - rbH - 4;
+            g.setColor(new Color(40, 15, 65, 200));
+            g.fillRoundRect(rbX, rbY, rbW, rbH, 4, 4);
+            g.setColor(new Color(157, 80, 187, 160));
+            g.setStroke(new BasicStroke(0.8f));
+            g.drawRoundRect(rbX, rbY, rbW, rbH, 4, 4);
+            g.setFont(new Font("Monospaced", Font.BOLD, 8));
+            g.setColor(new Color(200, 160, 255));
+            drawCenteredXY(g, "▲ RESTORE", rbX + rbW/2, rbY + 12);
+            graphRestoreBounds = new java.awt.Rectangle(rbX, rbY, rbW, rbH);
+        }
+        else
+        {
+            // ── FUNCTION BUTTON GRID ──────────────────────────────────────────
+            // All Java Math functions available. Click inserts into typing buffer.
+            calcButtons.clear();
+
+            // Row 1: Power / exponential
+            // Row 2: Trig
+            // Row 3: Hyperbolic
+            // Row 4: Log / misc
+            // Each button: label shown, insert string appended to typing buffer
+            Object[][] funcs = {
+                // label,       insert string,       row, col
+                {"√x",    "sqrt(",   0, 0},
+                {"cbrt",  "cbrt(",   0, 1},
+                {"xⁿ",   "pow(",    0, 2},
+                {"exp",   "exp(",    0, 3},
+                {"x²",   "x^2",     0, 4},
+                {"π",    "pi",      0, 5},
+                {"e",    "e",       0, 6},
+
+                {"sin",  "sin(",    1, 0},
+                {"cos",  "cos(",    1, 1},
+                {"tan",  "tan(",    1, 2},
+                {"asin", "asin(",   1, 3},
+                {"acos", "acos(",   1, 4},
+                {"atan", "atan(",   1, 5},
+
+                {"sinh", "sinh(",   2, 0},
+                {"cosh", "cosh(",   2, 1},
+                {"tanh", "tanh(",   2, 2},
+
+                {"log",  "log(",    3, 0},
+                {"ln",   "ln(",     3, 1},
+                {"abs",  "abs(",    3, 2},
+                {"ceil", "ceil(",   3, 3},
+                {"⌊x⌋", "floor(",  3, 4},
+                {"rnd",  "round(",  3, 5},
+            };
+
+            int startY = 46;
+            int btnW   = 38, btnH = 20, padX = 6, padY = 5;
+            int cols   = 7;
+
+            // Calculate layout based on panel width
+            int totalRowW = cols * (btnW + padX) - padX;
+            int marginX   = Math.max(4, (W - totalRowW) / 2);
+
+            for (Object[] f : funcs)
+            {
+                String label  = (String) f[0];
+                String insert = (String) f[1];
+                int    row    = (Integer) f[2];
+                int    col    = (Integer) f[3];
+
+                int bx = marginX + col * (btnW + padX);
+                int by = startY  + row * (btnH + padY);
+
+                // Background
+                g.setColor(new Color(25, 10, 45, 210));
+                g.fillRoundRect(bx, by, btnW, btnH, 4, 4);
+
+                // Border — highlight if mouse hovers (approximated by gold tint)
+                g.setColor(new Color(157, 80, 187, 90));
+                g.setStroke(new BasicStroke(0.8f));
+                g.drawRoundRect(bx, by, btnW, btnH, 4, 4);
+
+                // Label
+                g.setFont(new Font("Monospaced", Font.BOLD, 8));
+                g.setColor(new Color(200, 185, 255));
+                // center label in button
+                FontMetrics fm = g.getFontMetrics();
+                int lx = bx + (btnW - fm.stringWidth(label)) / 2;
+                int ly = by + btnH/2 + fm.getAscent()/2 - 1;
+                g.drawString(label, lx, ly);
+
+                calcButtons.add(new CalcButton(bx, by, btnW, btnH, insert));
+            }
+
+            // GRAPH EXPAND button (bottom-left)
+            int gbW = 80, gbH = 18;
+            int gbX = 6, gbY = H - gbH - 22;
+            g.setColor(new Color(10, 40, 20, 210));
+            g.fillRoundRect(gbX, gbY, gbW, gbH, 4, 4);
+            g.setColor(new Color(80, 220, 120, 120));
+            g.setStroke(new BasicStroke(0.8f));
+            g.drawRoundRect(gbX, gbY, gbW, gbH, 4, 4);
+            g.setFont(new Font("Monospaced", Font.BOLD, 8));
+            g.setColor(new Color(80, 220, 120));
+            drawCenteredXY(g, "▼ GRAPH", gbX + gbW/2, gbY + 12);
+            graphExpandBounds = new java.awt.Rectangle(gbX, gbY, gbW, gbH);
+        }
+
+        // ── STATUS BAR ────────────────────────────────────────────────────────
+        int barTop = H - 18;
+        g.setColor(new Color(20, 8, 35, 220));
+        g.fillRect(0, barTop, W, 18);
+        g.setColor(new Color(157, 80, 187, 40));
+        g.setStroke(new BasicStroke(0.5f));
+        g.drawLine(0, barTop, W, barTop);
+
+        g.setFont(new Font("Monospaced", Font.BOLD, 8));
+        g.setColor(state.isCalculatorUnlocked
+                ? new Color(80, 220, 120) : new Color(239, 68, 68));
+        drawLeft(g, state.isCalculatorUnlocked ? "SEC:OPEN" : "SEC:LOCK", 6, barTop + 12);
+
+        g.setColor(MatrixConfig.GODDESS_GOLD);
+        drawRight(g, graphExpanded ? "GRAPH ACTIVE" : "CALC ACTIVE", W - 6, barTop + 12);
+
+        g.dispose();
+        return img;
+    }
+
+    /** Expands the manifest panel to cover the bottom half of the matrix panel. */
+    public void expandGraphMode()
+    {
+        if (graphExpanded || imageManifest == null) return;
+        java.awt.Container parent = imageManifest.getParent();
+        if (parent == null) return;
+
+        graphExpanded = true;
+        // Save current bounds for restore
+        originalManifestBounds = imageManifest.getBounds();
+
+        int pW = parent.getWidth();
+        int pH = parent.getHeight();
+        // Start the graph at 35% down the screen, giving it a massive 65% of the total height.
+        imageManifest.setBounds(0, (int)(pH * 0.35), pW, (int)(pH * 0.65));
+        parent.setComponentZOrder(imageManifest, 0);
+        imageManifest.repaint();
+        setStatus("SYS_CALC: GRAPH EXPANDED");
+    }
+
+    /** Restores manifest to its original size after graph expand. */
+    public void collapseGraphMode()
+    {
+        if (!graphExpanded || imageManifest == null) return;
+        graphExpanded = false;
+        if (originalManifestBounds != null)
+            imageManifest.setBounds(originalManifestBounds);
+        else
+            imageManifest.setBounds(740, 10, 320, 240);
+        imageManifest.repaint();
+        setStatus("SYS_CALC: GRAPH RESTORED");
     }
 
     // ── MODE A WAVEFORM HUD ───────────────────────────────────────────────────
@@ -1181,6 +1630,13 @@ public class ImageViewer
     }
 
     // ── TEXT HELPERS ──────────────────────────────────────────────────────────
+
+    private void drawCenteredXY(Graphics2D g, String s, int cx, int y) 
+    {
+        if (s == null) return;
+        FontMetrics fm = g.getFontMetrics();
+        g.drawString(s, cx - fm.stringWidth(s) / 2, y);
+    }
 
     private void drawLeft(Graphics2D g, String s, int x, int y) 
     {
