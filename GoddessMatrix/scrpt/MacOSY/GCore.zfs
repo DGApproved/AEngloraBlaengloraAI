@@ -1,0 +1,366 @@
+#!/bin/bash
+# ════════════════════════════════════════════════════════════════════════════
+# GoddessCore.sh — MacOSY Shared Knowledge Processing Core
+# scripts/MacOSY/GoddessCore.sh
+#
+# Same command interface as GoddessCore.awk (Linux).
+# MacOSY-specific: ZFS-aware change detection, APFS fallback, diskutil.
+# Called by GoddessAPI.sh (Mac) and GoddessOS_Mac.py via subprocess.
+#
+# USAGE:
+#   GoddessCore.sh <cmd> [options] [file]
+#   GoddessCore.sh search   --query "ancient maps" dictionary.txt
+#   GoddessCore.sh blocks   --tag ENTRY --query "word" encyclopedia.txt
+#   GoddessCore.sh creatures --query "word" --env "land,air" creatures.txt
+#   GoddessCore.sh distill  --query "word" --max 32        < response.txt
+#   GoddessCore.sh kv_get   --key CPU_BRAND                  hardware.cache
+#   GoddessCore.sh score_block --query "word"              < block.txt
+#   GoddessCore.sh zfs_diff --dataset "pool/intake"        [--since @snap]
+#   GoddessCore.sh zfs_snapshot --dataset "pool/intake" --name goddess_snap
+#   GoddessCore.sh zfs_watch --dataset "pool/intake" --callback script.sh
+#
+# ZFS COMMANDS (Mac-only, no-op if ZFS not present):
+#   zfs_diff        Efficient change detection via zfs diff
+#   zfs_snapshot    Create/rotate a named snapshot for diffing
+#   zfs_watch       Background watch loop using zfs diff
+#
+# PLATFORM: MacOSY only. Linux uses GoddessCore.awk.
+#
+# Contributors:
+#   Derek Jason Gilhousen — ZFS integration design, MacOSY architecture
+#   Claude (Anthropic)    — GoddessCore.sh implementation
+# ════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+# ── ARGUMENT PARSING ─────────────────────────────────────────────────────────
+CMD="${1:-help}"; shift 2>/dev/null || true
+
+QUERY="" TAG="ENTRY" KEY="" MAX_CHARS=32 ENV_FILTER="land,air,any"
+DATASET="" SNAP_NAME="goddess_intake_snap" CALLBACK="" SINCE=""
+FILE_ARG=""
+MIN_TERM_LEN=4
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --query)    QUERY="$2";     shift 2 ;;
+        --tag)      TAG="$2";       shift 2 ;;
+        --key)      KEY="$2";       shift 2 ;;
+        --max)      MAX_CHARS="$2"; shift 2 ;;
+        --env)      ENV_FILTER="$2";shift 2 ;;
+        --dataset)  DATASET="$2";   shift 2 ;;
+        --name)     SNAP_NAME="$2"; shift 2 ;;
+        --callback) CALLBACK="$2";  shift 2 ;;
+        --since)    SINCE="$2";     shift 2 ;;
+        --min-term) MIN_TERM_LEN="$2"; shift 2 ;;
+        -*)         shift ;;
+        *)          FILE_ARG="$1";  shift ;;
+    esac
+done
+
+# ── ZFS DETECTION ─────────────────────────────────────────────────────────────
+ZFS_AVAILABLE=0
+command -v zfs &>/dev/null && ZFS_AVAILABLE=1
+
+zfs_check() {
+    [ $ZFS_AVAILABLE -eq 1 ] || { echo "ZFS not available on this system." >&2; return 1; }
+}
+
+# ── FILESYSTEM DETECTION ─────────────────────────────────────────────────────
+detect_fs() {
+    local path="${1:-.}"
+    local resolved; resolved=$(cd "$path" 2>/dev/null && pwd)
+    diskutil info "$resolved" 2>/dev/null \
+        | grep -E "File System Personality|Type \(Bundle\)" \
+        | head -1 | awk -F: '{print tolower($2)}' | tr -d ' ' \
+        || echo "apfs"
+}
+
+# ── TERM SPLITTING ────────────────────────────────────────────────────────────
+# Returns array of query terms longer than MIN_TERM_LEN
+split_terms() {
+    local q="$1"
+    for w in $q; do
+        [ "${#w}" -ge "$MIN_TERM_LEN" ] && echo "${w,,}"
+    done
+}
+
+# ── SCORE BLOCK ───────────────────────────────────────────────────────────────
+score_block_text() {
+    local text="$1" query="$2"
+    local score=0
+    local low; low="${text,,}"
+    while IFS= read -r term; do
+        [[ "$low" == *"$term"* ]] && score=$((score+2))
+    done < <(split_terms "$query")
+    echo "$score"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMMAND: search
+# Search a file for query terms. Output matching lines indented with two spaces.
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_search() {
+    local file="${FILE_ARG:-/dev/stdin}"
+    [ -f "$file" ] || return 0
+    local max_results=6
+    local count=0
+    while IFS= read -r term; do
+        while IFS= read -r line && [ $count -lt $max_results ]; do
+            # Trim to 200 chars
+            local out="${line:0:200}"
+            [ ${#line} -gt 200 ] && out+="..."
+            echo "  $out"
+            count=$((count+1))
+        done < <(grep -in "$term" "$file" 2>/dev/null | head -2)
+    done < <(split_terms "$QUERY")
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMMAND: blocks
+# Parse [TAG]...[/TAG] blocks. Print matching blocks separated by ---.
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_blocks() {
+    local file="${FILE_ARG:-/dev/stdin}"
+    [ -f "$file" ] || return 0
+    local in_block=0 block=""
+    local open_tag="[$TAG]" close_tag="[/$TAG]"
+    while IFS= read -r line; do
+        if [ "$line" = "$open_tag" ]; then
+            in_block=1; block=""
+        elif [ "$line" = "$close_tag" ] && [ $in_block -eq 1 ]; then
+            local score; score=$(score_block_text "$block" "$QUERY")
+            if [ "$score" -gt 0 ] || [ -z "$QUERY" ]; then
+                echo "$block"
+                echo "---"
+            fi
+            in_block=0; block=""
+        elif [ $in_block -eq 1 ]; then
+            block="${block:+$block
+}$line"
+        fi
+    done < "$file"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMMAND: creatures
+# Search creatures.txt. Filter by environment. Output: ENV|NAME|BEHAVIOR_FIRST
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_creatures() {
+    local file="${FILE_ARG:-/dev/stdin}"
+    [ -f "$file" ] || return 0
+    local in_block=0 block="" count=0
+
+    while IFS= read -r line; do
+        if [ "$line" = "[CREATURE]" ]; then
+            in_block=1; block=""
+        elif [ "$line" = "[/CREATURE]" ] && [ $in_block -eq 1 ]; then
+            local c_env c_name c_realm c_behav
+            c_env=$(echo "$block"  | grep "^ENVIRONMENT=" | cut -d= -f2-)
+            c_name=$(echo "$block" | grep "^NAME="        | cut -d= -f2-)
+            c_realm=$(echo "$block"| grep "^REALM="       | cut -d= -f2-)
+            c_behav=$(echo "$block"| grep "^BEHAVIOR="    | cut -d= -f2- | head -1)
+
+            # Environment filter
+            local env_ok=0
+            local IFS_save="$IFS"; IFS=","
+            for allowed in $ENV_FILTER; do
+                for creature_env in $c_env; do
+                    [ "${creature_env,,}" = "${allowed,,}" ] && env_ok=1
+                done
+            done
+            IFS="$IFS_save"
+            [ "$c_realm" = "any" ] && env_ok=1
+            [ $env_ok -eq 0 ] && { in_block=0; block=""; continue; }
+
+            # Score
+            local score; score=$(score_block_text "$block" "$QUERY")
+            if [ "$score" -gt 0 ] || [ "$c_realm" = "any" ]; then
+                # First sentence of behavior
+                local first; first="${c_behav%%.*}"
+                echo "$c_env|$c_name|$first"
+                count=$((count+1))
+                [ $count -ge 3 ] && break
+            fi
+            in_block=0; block=""
+        elif [ $in_block -eq 1 ]; then
+            block="${block:+$block
+}$line"
+        fi
+    done < "$file"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMMAND: distill
+# Read stdin, find densest phrase ≤ MAX_CHARS. Atmospheric distillation.
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_distill() {
+    local best="" best_score=-999 best_len=9999
+
+    # Collect stdin, strip structural lines
+    local clean=""
+    while IFS= read -r line; do
+        [[ "$line" =~ ^\[ ]]    && continue
+        [[ "$line" =~ ^From\ ]] && continue
+        [[ "$line" =~ ^# ]]     && continue
+        [[ -z "${line// }" ]]   && continue
+        line="${line#"${line%%[![:space:]]*}"}"  # ltrim
+        clean="${clean:+$clean }$line"
+    done
+
+    # Split on sentence boundaries
+    local IFS_save="$IFS"
+    while IFS= read -r candidate; do
+        candidate="${candidate#"${candidate%%[![:space:]]*}"}"
+        candidate="${candidate%"${candidate##*[![:space:]]}"}"
+        local clen=${#candidate}
+        [ "$clen" -lt 4 ] && continue
+
+        local score=0
+        while IFS= read -r term; do
+            [[ "${candidate,,}" == *"$term"* ]] && score=$((score+2))
+        done < <(split_terms "$QUERY")
+        [ "$clen" -le "$MAX_CHARS" ] && score=$((score+1))
+
+        if [ "$score" -gt "$best_score" ] || \
+           { [ "$score" -eq "$best_score" ] && [ "$clen" -lt "$best_len" ]; }; then
+            best="$candidate"; best_score=$score; best_len=$clen
+        fi
+    done < <(echo "$clean" | tr '.!?;' '\n')
+
+    # Return if fits
+    if [ -n "$best" ] && [ "${#best}" -le "$MAX_CHARS" ]; then
+        echo "$best"; return
+    fi
+
+    # Truncate at word boundary
+    if [ -n "$best" ]; then
+        echo "$best" | awk -v max="$MAX_CHARS" '{
+            out=""; n=split($0,w," ")
+            for(i=1;i<=n;i++){t=(out=="")?w[i]:out" "w[i]; if(length(t)<=max)out=t; else break}
+            print out}'
+        return
+    fi
+
+    echo "${clean:0:$MAX_CHARS}"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMMAND: kv_get
+# Read key=value file. Return value for KEY.
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_kv_get() {
+    local file="${FILE_ARG:-/dev/stdin}"
+    [ -f "$file" ] || return 0
+    while IFS='=' read -r k v; do
+        [[ "$k" =~ ^# ]] && continue
+        k="${k// /}"
+        if [ "$k" = "$KEY" ]; then
+            echo "$v"
+            return
+        fi
+    done < "$file"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMMAND: score_block
+# Score stdin block against query. Returns integer.
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_score_block() {
+    local text; text=$(cat)
+    score_block_text "$text" "$QUERY"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ZFS COMMANDS — MacOSY only
+# ══════════════════════════════════════════════════════════════════════════════
+
+# COMMAND: zfs_snapshot
+# Create or rotate a named snapshot on the given dataset.
+# Used to create a baseline for zfs_diff change detection.
+cmd_zfs_snapshot() {
+    zfs_check || return 1
+    [ -z "$DATASET" ] && { echo "ERR: --dataset required" >&2; return 1; }
+    local snap="${DATASET}@${SNAP_NAME}"
+    # Destroy old snapshot if exists, then create fresh
+    zfs destroy "$snap" 2>/dev/null || true
+    if zfs snapshot "$snap" 2>/dev/null; then
+        echo "SNAPSHOT_OK:$snap"
+    else
+        echo "SNAPSHOT_FAIL:$snap" >&2
+        return 1
+    fi
+}
+
+# COMMAND: zfs_diff
+# List files changed since a snapshot (or last goddess_intake_snap).
+# Much more efficient than polling on large intake folders.
+# Output: one filepath per line (changed/new/deleted files).
+cmd_zfs_diff() {
+    zfs_check || return 1
+    [ -z "$DATASET" ] && { echo "ERR: --dataset required" >&2; return 1; }
+    local snap="${SINCE:-${DATASET}@${SNAP_NAME}}"
+    # zfs diff output: M/+/- path
+    # We return only + (new) and M (modified) files
+    zfs diff "$snap" "$DATASET" 2>/dev/null \
+        | awk '$1 ~ /^[+M]$/ { print $2 }' \
+        || true
+}
+
+# COMMAND: zfs_watch
+# Background watch loop using periodic zfs_diff.
+# Creates a snapshot, then polls diff every N seconds.
+# When changes detected, runs CALLBACK script with changed files as args.
+# More efficient than inotifywait on ZFS volumes — uses CoW snapshots.
+cmd_zfs_watch() {
+    zfs_check || return 1
+    [ -z "$DATASET" ] && { echo "ERR: --dataset required" >&2; return 1; }
+    [ -z "$CALLBACK" ] && { echo "ERR: --callback required" >&2; return 1; }
+
+    local interval=5  # seconds between diff checks
+
+    # Create baseline snapshot
+    local snap="${DATASET}@${SNAP_NAME}"
+    zfs destroy "$snap" 2>/dev/null || true
+    zfs snapshot "$snap" 2>/dev/null || {
+        echo "ERR: cannot snapshot $DATASET" >&2; return 1
+    }
+
+    echo "ZFS_WATCH: monitoring $DATASET via snapshot diff"
+
+    while true; do
+        sleep "$interval"
+        local changes
+        changes=$(zfs diff "$snap" "$DATASET" 2>/dev/null \
+                    | awk '$1 ~ /^[+M]$/ { print $2 }' \
+                    | grep -c .)  || changes=0
+        if [ "$changes" -gt 0 ]; then
+            # Rotate snapshot and invoke callback
+            local new_snap="${DATASET}@${SNAP_NAME}_prev"
+            zfs rename "$snap" "$new_snap" 2>/dev/null || true
+            zfs snapshot "$snap" 2>/dev/null || true
+            "$CALLBACK" &
+            zfs destroy "$new_snap" 2>/dev/null || true
+        fi
+    done
+}
+
+# ── DISPATCH ──────────────────────────────────────────────────────────────────
+case "$CMD" in
+    search)       cmd_search       ;;
+    blocks)       cmd_blocks       ;;
+    creatures)    cmd_creatures    ;;
+    distill)      cmd_distill      ;;
+    kv_get)       cmd_kv_get       ;;
+    score_block)  cmd_score_block  ;;
+    zfs_snapshot) cmd_zfs_snapshot ;;
+    zfs_diff)     cmd_zfs_diff     ;;
+    zfs_watch)    cmd_zfs_watch    ;;
+    detect_fs)    detect_fs "${FILE_ARG:-.}" ;;
+    help|*)
+        echo "GoddessCore.sh — MacOSY shared core"
+        echo "Commands: search blocks creatures distill kv_get score_block"
+        echo "ZFS:      zfs_snapshot zfs_diff zfs_watch"
+        echo "Util:     detect_fs"
+        ;;
+esac
