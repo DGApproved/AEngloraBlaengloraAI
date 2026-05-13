@@ -1,0 +1,3 @@
+# shared.txt — tool pipeline differential map
+# Format: OUTPUT_OF_TOOL->INPUT_TO_TOOL : FIELD_MAPPING
+# Written by resource scanner. AI may extend this file.
