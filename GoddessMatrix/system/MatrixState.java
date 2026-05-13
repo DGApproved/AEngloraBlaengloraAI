@@ -53,12 +53,26 @@ public class MatrixState {
 
     // ─────────────────────────────────────────────
     // OS / ENVIRONMENT
+    // Detected once at construction from System.getProperty("os.name").
+    // All downstream code reads these flags — no inline os.name calls needed.
+    // ApiBridge.getOSScriptFolderFile() uses isWindows/isMac to select
+    // scripts/Windows, scripts/MacOSY, or scripts/Linux automatically.
     // ─────────────────────────────────────────────
-    public String osName = "unknown";
-    public boolean isWindows = false;
-    public boolean isMac = false;
-    public boolean isLinux = true;
-    public String shellName = "bash";
+    public String  osName;
+    public boolean isWindows;
+    public boolean isMac;
+    public boolean isLinux;
+    public String  shellName;
+
+    public MatrixState() {
+        String raw = System.getProperty("os.name", "").toLowerCase();
+        isWindows = raw.contains("win");
+        isMac     = raw.contains("mac") || raw.contains("darwin");
+        isLinux   = !isWindows && !isMac;
+        osName    = raw;
+        shellName = isWindows ? "cmd" : "bash";
+        // Call wireHooks() after UI components are initialized.
+    }
 
     // ─────────────────────────────────────────────
     // CORE PATHS
