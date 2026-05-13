@@ -139,51 +139,37 @@ public final class OptimizeRender
                 OPAQUE[i] = 1;
             }
 
-            // ── WorldState.MAT_VOID ────────────────────────────────────────────
-            set(WorldState.MAT_VOID,
-                0,   0,   0,   0.0,  0.0, 0.04, 0); // fully transparent
+            // Uses the 8 material slots from WorldState directly.
+            // WorldState.MAT_* constants carry the canonical integer values.
+            // Alias constants (MAT_DIRT=MAT_AGGREGATE_D etc.) share slots —
+            // only one set() call per unique integer to avoid double-writes.
 
-            // ── WorldState.MAT_DIRT ────────────────────────────────────────────
-            // Default planet surface. Earthy brown, rough, non-metallic.
-            set(WorldState.MAT_DIRT,
-                139, 90,  43,  0.95, 0.0, 0.04, 1);
+            // 0: VOID — fully transparent
+            set(WorldState.MAT_VOID,        0,   0,   0,   0.0,  0.0, 0.04, 0);
 
-            // ── WorldState.MAT_SOIL ────────────────────────────────────────────
-            // Warmer tan. Slightly less rough than dirt.
-            set(WorldState.MAT_SOIL,
-                160, 120, 70,  0.85, 0.0, 0.04, 1);
+            // 1: BEDROCK — near-black, semi-metallic. .java files. Hardest.
+            set(WorldState.MAT_BEDROCK,     30,  25,  35,  0.70, 0.2, 0.06, 1);
 
-            // ── WorldState.MAT_SEDIMENT ────────────────────────────────────────
-            // Grey-brown layered. Medium rough.
-            set(WorldState.MAT_SEDIMENT,
-                110, 100, 85,  0.80, 0.0, 0.04, 1);
+            // 2: AGGREGATE_G — dictionary/persona/encyclopedia files.
+            //    Deep blue-purple. Knowledge aggregate, slight sheen.
+            set(WorldState.MAT_AGGREGATE_G, 80,  60,  180, 0.45, 0.1, 0.08, 1);
 
-            // ── WorldState.MAT_STONE ───────────────────────────────────────────
-            // Cool grey. .sh files — rough surface.
-            set(WorldState.MAT_STONE,
-                130, 135, 140, 0.80, 0.0, 0.04, 1);
+            // 3: AGGREGATE_T — journal/almanac/stone files.
+            //    Cool grey layered. Medium rough.
+            set(WorldState.MAT_AGGREGATE_T, 115, 110, 130, 0.80, 0.0, 0.04, 1);
 
-            // ── WorldState.MAT_ORE ─────────────────────────────────────────────
-            // Deep blue-purple. Encyclopedia-validated knowledge. Slight sheen.
-            set(WorldState.MAT_ORE,
-                80,  60,  180, 0.45, 0.1, 0.08, 1);
+            // 4: AGGREGATE_D — default planet surface. Earthy brown, rough.
+            set(WorldState.MAT_AGGREGATE_D, 139, 90,  43,  0.95, 0.0, 0.04, 1);
 
-            // ── WorldState.MAT_CONVERTED_ORE ──────────────────────────────────
-            // Amber-gold. Religion theories transmuted into knowledge.
-            // Slightly metallic — the conversion process leaves a lustre.
-            set(WorldState.MAT_CONVERTED_ORE,
-                200, 155, 40,  0.35, 0.3, 0.15, 1);
+            // 5: CRAFTED_BLUE — blue thread artifacts. Bright cyan, polished.
+            set(WorldState.MAT_CRAFTED_BLUE, 40, 220, 210, 0.20, 0.0, 0.10, 1);
 
-            // ── WorldState.MAT_CRAFTED ─────────────────────────────────────────
-            // Bright cyan. Composite crafted artifacts. Low roughness — polished.
-            set(WorldState.MAT_CRAFTED,
-                40,  220, 210, 0.20, 0.0, 0.10, 1);
+            // 6: CRAFTED_GOLD — religion → knowledge transmutation.
+            //    Amber-gold, slightly metallic lustre.
+            set(WorldState.MAT_CRAFTED_GOLD, 200, 155, 40, 0.35, 0.3, 0.15, 1);
 
-            // ── WorldState.MAT_BEDROCK ─────────────────────────────────────────
-            // Near-black with faint grid. .java files. Hardest material.
-            // Slight metallic feel — the skeleton of the system.
-            set(WorldState.MAT_BEDROCK,
-                30,  25,  35,  0.70, 0.2, 0.06, 1);
+            // 7: AVATAR_GLOW — avatar surface. Bright emissive white-purple.
+            set(WorldState.MAT_AVATAR_GLOW, 200, 180, 255, 0.15, 0.0, 0.20, 1);
         }
 
         private static void set(int id, int r, int g, int b,

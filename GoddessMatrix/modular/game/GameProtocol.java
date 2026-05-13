@@ -37,8 +37,13 @@ public class GameProtocol
     private final File       eventsFile;
     private final boolean    matrixContext;
 
-    // Set by IceSandbox from MatrixState.apiStdinMap when game launches.
-    // Enables C key → Python direct stdin path.
+    // Matrix capability hooks — set by Game.java after launch.
+    // Null in standalone mode; each use is guarded.
+    private system.MatrixState.AISendHook  aiSendHook  = null;
+    private system.MatrixState.ErrorHook   errorHook   = null;
+    private system.MatrixState.ChatAppendHook chatHook  = null;
+
+    // Fallback for standalone mode — direct stdin when no hook available.
     private PrintWriter pythonStdin = null;
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -66,6 +71,12 @@ public class GameProtocol
 
     // ── C KEY CONDUIT ─────────────────────────────────────────────────────────
 
+    /** Wired by Game.java from state.aiSendHook (preferred over direct stdin). */
+    public void setAISendHook(system.MatrixState.AISendHook hook)  { this.aiSendHook = hook; }
+    public void setErrorHook(system.MatrixState.ErrorHook hook)     { this.errorHook  = hook; }
+    public void setChatHook(system.MatrixState.ChatAppendHook hook) { this.chatHook   = hook; }
+
+    /** Fallback for standalone mode — direct stdin when no hook available. */
     public void setPythonStdin(PrintWriter stdin)
     {
         this.pythonStdin = stdin;
@@ -74,19 +85,42 @@ public class GameProtocol
     public void sendToPython(String text)
     {
         if (text == null || text.trim().isEmpty()) return;
+        String t = text.trim();
 
-        if (pythonStdin != null)
+        // Add to in-game chat history as the player's message
+        addChatMessage("YOU", t);
+
+        if (aiSendHook != null)
         {
-            pythonStdin.println(text.trim());
+            // Matrix hook path — preferred
+            try { aiSendHook.send(t); }
+            catch (Exception e) { logError("AISendHook", e); }
+            writeEvent("C_KEY_QUERY", t.substring(0, Math.min(80, t.length())));
+        }
+        else if (pythonStdin != null)
+        {
+            // Standalone fallback — direct stdin
+            pythonStdin.println(t);
             pythonStdin.flush();
-            writeEvent("C_KEY_QUERY",
-                text.trim().substring(0, Math.min(80, text.trim().length())));
+            writeEvent("C_KEY_QUERY", t.substring(0, Math.min(80, t.length())));
         }
         else
         {
-            // Standalone — no live AI session, log only
-            writeEvent("C_KEY_QUERY_OFFLINE", text.trim());
+            writeEvent("C_KEY_QUERY_OFFLINE", t);
         }
+    }
+
+    private void addChatMessage(String speaker, String text)
+    {
+        world.chatMessages.addLast(new WorldState.ChatMessage(speaker, text));
+        while (world.chatMessages.size() > WorldState.MAX_CHAT_MESSAGES)
+            world.chatMessages.removeFirst();
+    }
+
+    private void logError(String context, Exception e)
+    {
+        if (errorHook != null) errorHook.log("GameProtocol:" + context, e);
+        else writeEvent("ERROR", context + ": " + e.getMessage());
     }
 
     // ── INBOUND TAG HANDLER ───────────────────────────────────────────────────
@@ -128,8 +162,22 @@ public class GameProtocol
                 catch (NumberFormatException ignored) {}
             }
         }
+        else if (line.startsWith("[GAME_CHAT:"))
+        {
+            // [GAME_CHAT:] — shows in the in-game chat history overlay.
+            // Use this for conversational AI responses.
+            // Use [GAME_NARRATE:] for ambient floating text above the avatar.
+            String text = line.substring(11, line.length() - 1).trim();
+            addChatMessage("AI", text);
+            // Also surface as narration briefly so the player sees it
+            // even if the chat overlay isn't open.
+            world.narrateText     = text;
+            world.narrateExpireMs = System.currentTimeMillis() + 4000L;
+        }
         else if (line.startsWith("[GAME_NARRATE:"))
         {
+            // [GAME_NARRATE:] — floating text above avatar, no chat history.
+            // Use for ambient scene description, world events.
             String text = line.substring(14, line.length() - 1).trim();
             world.narrateText     = text;
             world.narrateExpireMs = System.currentTimeMillis()

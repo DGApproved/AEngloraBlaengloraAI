@@ -109,7 +109,17 @@ public class SphereRenderer
         float[] cam  = world.camPos;
         float[] tgt  = world.camTarget;
         float[] fwd  = normalize(sub(tgt, cam));
-        float[] right = normalize(cross(fwd, new float[]{0,1,0}));
+
+        // Restore the local 'Up' vector (surface normal) fix!
+        float latRad = (float) Math.toRadians(world.playerLatDeg);
+        float angRad = (float) Math.toRadians(world.playerAngleDeg);
+        float[] playerUp = new float[]{
+            (float)(Math.cos(latRad) * Math.sin(angRad)),
+            (float) Math.sin(latRad),
+            (float)(Math.cos(latRad) * Math.cos(angRad))
+        };
+
+        float[] right = normalize(cross(fwd, playerUp));
         float[] up   = cross(right, fwd);
 
         float aspect = (float) bW / bH;
@@ -171,6 +181,17 @@ public class SphereRenderer
         }
     }
 
+    //Color Blender
+    private int blendColor(int c1, int c2, float t) {
+        t = Math.max(0f, Math.min(1f, t));
+        int r1 = (c1 >> 16) & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = c1 & 0xFF;
+        int r2 = (c2 >> 16) & 0xFF, g2 = (c2 >> 8) & 0xFF, b2 = c2 & 0xFF;
+        int r = (int)(r1 + (r2 - r1) * t);
+        int g = (int)(g1 + (g2 - g1) * t);
+        int b = (int)(b1 + (b2 - b1) * t);
+        return (r << 16) | (g << 8) | b;
+    }
+
     // ── RAY MARCHER ───────────────────────────────────────────────────────────
 
     private int march(float rox, float roy, float roz,
@@ -191,7 +212,11 @@ public class SphereRenderer
             if (d < SURF_DIST)
             {
                 // Hit — calculate normal and shade
-                return shade(px, py, pz, res.materialType, world);
+                int surfaceColor = shade(px, py, pz, res.materialType, world);
+                
+                // Atmospheric depth fog (light tinted blue)
+                float fogFactor = 1.0f - (float)Math.exp(-t * 0.02f);
+                return blendColor(surfaceColor, 0x55AADD, fogFactor * 0.8f);
             }
 
             t += d;
@@ -199,7 +224,28 @@ public class SphereRenderer
         }
 
         // Miss — sky/void color
-        return skyColor(rdx, rdy, rdz, world);
+        int skyCol = skyColor(rdx, rdy, rdz, world);
+        
+        // Atmospheric Halo around the planet
+        WorldState.SystemPlanet planet = world.planets[world.activePlanet];
+        if (planet != null) {
+            float atmoRadius = planet.coreRadius * 1.35f; // 35% larger than core
+            float b = 2.0f * (rox*rdx + roy*rdy + roz*rdz);
+            float c = (rox*rox + roy*roy + roz*roz) - atmoRadius*atmoRadius;
+            float disc = b*b - 4.0f*c;
+            if (disc > 0) {
+                float t1 = (-b - (float)Math.sqrt(disc)) / 2.0f;
+                float t2 = (-b + (float)Math.sqrt(disc)) / 2.0f;
+                float atmoDist = Math.max(0, t2 - Math.max(0, t1));
+                if (atmoDist > 0) {
+                    float glow = Math.min(1.0f, atmoDist / (atmoRadius * 1.5f));
+                    skyCol = blendColor(skyCol, 0x55AADD, glow * 0.9f); 
+                }
+            }
+        }
+        return skyCol;
+        // Miss — sky/void color
+        //return skyColor(rdx, rdy, rdz, world);
     }
 
     // ── SCENE SDF ─────────────────────────────────────────────────────────────
@@ -237,7 +283,173 @@ public class SphereRenderer
             minHard = WorldState.HARD_STRUCTURAL;
         }
 
-        // ── TERRAIN SPHERES ───────────────────────────────────────────────────
+        // ── PLAYER AVATAR (Glasses Off / Selfie Mode) ─────────────────────────
+        /*if (!world.isFirstPerson) {
+            float px2 = world.playerPos[0];
+            float py2 = world.playerPos[1];
+            float pz2 = world.playerPos[2];
+
+            // 1. Get local "Up" vector to stand perpendicular to the ground
+            float latRad = (float) Math.toRadians(world.playerLatDeg);
+            float angRad = (float) Math.toRadians(world.playerAngleDeg);
+            float ux = (float)(Math.cos(latRad) * Math.sin(angRad));
+            float uy = (float) Math.sin(latRad);
+            float uz = (float)(Math.cos(latRad) * Math.cos(angRad));
+
+            // 2. Base forms
+            float hx = px2 + ux * world.playerHeightFeet;
+            float hy = py2 + uy * world.playerHeightFeet;
+            float hz = pz2 + uz * world.playerHeightFeet;
+            float headDist = sphereSDF(px, py, pz, hx, hy, hz, 0.5f);
+
+            float tx = px2 + ux * (world.playerHeightFeet * 0.5f);
+            float ty = py2 + uy * (world.playerHeightFeet * 0.5f);
+            float tz = pz2 + uz * (world.playerHeightFeet * 0.5f);
+            float torsoDist = sphereSDF(px, py, pz, tx, ty, tz, 0.8f);
+
+            // Blend head and torso
+            float bodyDist = smin(headDist, torsoDist, 6.0f);
+
+            // 3. Face Math (Always look at the camera/glasses)
+            float fx = world.camPos[0] - hx;
+            float fy = world.camPos[1] - hy;
+            float fz = world.camPos[2] - hz;
+            float flen = (float)Math.sqrt(fx*fx + fy*fy + fz*fz);
+            if (flen > 0.001f) { fx /= flen; fy /= flen; fz /= flen; }
+            
+            // Right vector for eye spacing
+            float rx = uy*fz - uz*fy;
+            float ry = uz*fx - ux*fz;
+            float rz = ux*fy - uy*fx;
+
+            // 4. Carve out eyes using Math.max() for boolean subtraction
+            float eyeSpacing = 0.2f;
+            float eyeHeight  = 0.1f;
+            float eyeDepth   = 0.45f; 
+            float eyeSize    = 0.08f;
+            
+            float leftEye = sphereSDF(px, py, pz, 
+                hx + fx*eyeDepth + rx*eyeSpacing + ux*eyeHeight, 
+                hy + fy*eyeDepth + ry*eyeSpacing + uy*eyeHeight, 
+                hz + fz*eyeDepth + rz*eyeSpacing + uz*eyeHeight, eyeSize);
+                
+            float rightEye = sphereSDF(px, py, pz, 
+                hx + fx*eyeDepth - rx*eyeSpacing + ux*eyeHeight, 
+                hy + fy*eyeDepth - ry*eyeSpacing + uy*eyeHeight, 
+                hz + fz*eyeDepth - rz*eyeSpacing + uz*eyeHeight, eyeSize);
+
+            // Carve the eye sockets out of the solid head
+            bodyDist = Math.max(bodyDist, -leftEye);
+            bodyDist = Math.max(bodyDist, -rightEye);
+
+            // 5. Add a pointy nose (sphere protruding out and slightly down)
+            float noseX = hx + fx*0.55f - ux*0.05f;
+            float noseY = hy + fy*0.55f - uy*0.05f;
+            float noseZ = hz + fz*0.55f - uz*0.05f;
+            float noseDist = sphereSDF(px, py, pz, noseX, noseY, noseZ, 0.07f);
+            
+            // Smoothly blend the nose onto the face
+            bodyDist = smin(bodyDist, noseDist, 12.0f);
+
+            if (bodyDist < minDist) {
+                minDist = bodyDist;
+                minMat  = WorldState.MAT_CRAFTED; 
+                minHard = WorldState.HARD_STRUCTURAL;
+            }
+        }*/
+        // ── ASTRID AVATAR (Blue Soda Straws) ──────────────────────────────────
+        if (!world.isFirstPerson) {
+            float px2 = world.playerPos[0];
+            float py2 = world.playerPos[1];
+            float pz2 = world.playerPos[2];
+
+            // 1. Local Coordinate System (Up, East, North)
+            float latRad = (float) Math.toRadians(world.playerLatDeg);
+            float angRad = (float) Math.toRadians(world.playerAngleDeg);
+            float outX = (float)(Math.cos(latRad) * Math.sin(angRad));
+            float outY = (float) Math.sin(latRad);
+            float outZ = (float)(Math.cos(latRad) * Math.cos(angRad));
+            float northX = (float)(-Math.sin(latRad) * Math.sin(angRad));
+            float northY = (float) Math.cos(latRad);
+            float northZ = (float)(-Math.sin(latRad) * Math.cos(angRad));
+            float eastX =  (float) Math.cos(angRad);
+            float eastY =  0f;
+            float eastZ = -(float) Math.sin(angRad);
+
+            float strawRadius = 0.08f; // Thickness of the blue straws
+            float astridDist = MAX_DIST;
+
+            // 2. The Spine (Torso)
+            float spineBaseX = px2 + outX * 2.0f; // Hips
+            float spineBaseY = py2 + outY * 2.0f;
+            float spineBaseZ = pz2 + outZ * 2.0f;
+            
+            float spineTopX = px2 + outX * 4.5f; // Neck/Shoulders
+            float spineTopY = py2 + outY * 4.5f;
+            float spineTopZ = pz2 + outZ * 4.5f;
+            
+            astridDist = smin(astridDist, capsuleSDF(px, py, pz, spineBaseX, spineBaseY, spineBaseZ, spineTopX, spineTopY, spineTopZ, strawRadius), 0.5f);
+
+            // 3. Legs
+            float leftFootX = px2 - eastX * 0.5f; float leftFootY = py2 - eastY * 0.5f; float leftFootZ = pz2 - eastZ * 0.5f;
+            float rightFootX = px2 + eastX * 0.5f; float rightFootY = py2 + eastY * 0.5f; float rightFootZ = pz2 + eastZ * 0.5f;
+            astridDist = smin(astridDist, capsuleSDF(px, py, pz, spineBaseX, spineBaseY, spineBaseZ, leftFootX, leftFootY, leftFootZ, strawRadius), 0.5f);
+            astridDist = smin(astridDist, capsuleSDF(px, py, pz, spineBaseX, spineBaseY, spineBaseZ, rightFootX, rightFootY, rightFootZ, strawRadius), 0.5f);
+
+            // 4. The Head (Controlled by Arrow Keys)
+            float headPitch = (float) Math.toRadians(world.headPitch);
+            float headYaw   = (float) Math.toRadians(world.headYaw);
+            float hDirX = (float)(Math.cos(headPitch) * Math.sin(headYaw));
+            float hDirY = (float) Math.sin(headPitch);
+            float hDirZ = -(float)(Math.cos(headPitch) * Math.cos(headYaw));
+            
+            float hwX = hDirX * eastX + hDirZ * northX + hDirY * outX;
+            float hwY = hDirX * eastY + hDirZ * northY + hDirY * outY;
+            float hwZ = hDirX * eastZ + hDirZ * northZ + hDirY * outZ;
+            
+            float headTopX = spineTopX + hwX * 1.0f;
+            float headTopY = spineTopY + hwY * 1.0f;
+            float headTopZ = spineTopZ + hwZ * 1.0f;
+            astridDist = smin(astridDist, capsuleSDF(px, py, pz, spineTopX, spineTopY, spineTopZ, headTopX, headTopY, headTopZ, strawRadius), 0.5f);
+
+            // 5. Right Arm (Controlled by CTRL + Arrow Keys)
+            float rShoulderX = spineTopX + eastX * 0.8f; float rShoulderY = spineTopY + eastY * 0.8f; float rShoulderZ = spineTopZ + eastZ * 0.8f;
+            float rArmPitch = (float) Math.toRadians(world.rightArmPitch);
+            float rArmYaw   = (float) Math.toRadians(world.rightArmYaw);
+            float rDirX = (float)(Math.cos(rArmPitch) * Math.sin(rArmYaw));
+            float rDirY = (float) Math.sin(rArmPitch);
+            float rDirZ = -(float)(Math.cos(rArmPitch) * Math.cos(rArmYaw));
+            float rwX = rDirX * eastX + rDirZ * northX + rDirY * outX;
+            float rwY = rDirX * eastY + rDirZ * northY + rDirY * outY;
+            float rwZ = rDirX * eastZ + rDirZ * northZ + rDirY * outZ;
+            
+            float rHandX = rShoulderX + rwX * 2.0f; float rHandY = rShoulderY + rwY * 2.0f; float rHandZ = rShoulderZ + rwZ * 2.0f;
+            astridDist = smin(astridDist, capsuleSDF(px, py, pz, spineTopX, spineTopY, spineTopZ, rShoulderX, rShoulderY, rShoulderZ, strawRadius), 0.5f); // collarbone
+            astridDist = smin(astridDist, capsuleSDF(px, py, pz, rShoulderX, rShoulderY, rShoulderZ, rHandX, rHandY, rHandZ, strawRadius), 0.5f);
+
+            // 6. Left Arm (Controlled by ALT + Arrow Keys)
+            float lShoulderX = spineTopX - eastX * 0.8f; float lShoulderY = spineTopY - eastY * 0.8f; float lShoulderZ = spineTopZ - eastZ * 0.8f;
+            float lArmPitch = (float) Math.toRadians(world.leftArmPitch);
+            float lArmYaw   = (float) Math.toRadians(world.leftArmYaw);
+            float lDirX = (float)(Math.cos(lArmPitch) * Math.sin(lArmYaw));
+            float lDirY = (float) Math.sin(lArmPitch);
+            float lDirZ = -(float)(Math.cos(lArmPitch) * Math.cos(lArmYaw));
+            float lwX = lDirX * eastX + lDirZ * northX + lDirY * outX;
+            float lwY = lDirX * eastY + lDirZ * northY + lDirY * outY;
+            float lwZ = lDirX * eastZ + lDirZ * northZ + lDirY * outZ;
+            
+            float lHandX = lShoulderX + lwX * 2.0f; float lHandY = lShoulderY + lwY * 2.0f; float lHandZ = lShoulderZ + lwZ * 2.0f;
+            astridDist = smin(astridDist, capsuleSDF(px, py, pz, spineTopX, spineTopY, spineTopZ, lShoulderX, lShoulderY, lShoulderZ, strawRadius), 0.5f); // collarbone
+            astridDist = smin(astridDist, capsuleSDF(px, py, pz, lShoulderX, lShoulderY, lShoulderZ, lHandX, lHandY, lHandZ, strawRadius), 0.5f);
+
+            // Render Astrid in bright blue to match the soda straw theme
+            if (astridDist < minDist) {
+                minDist = astridDist;
+                minMat  = WorldState.MAT_CRAFTED; // Or any blue MAT you prefer
+                minHard = WorldState.HARD_STRUCTURAL;
+            }
+        }
+// ── TERRAIN SPHERES ───────────────────────────────────────────────────
         // Only evaluate spheres within LOD threshold of current position.
         float playerDist = (float) Math.sqrt(px*px + py*py + pz*pz);
 
@@ -262,6 +474,12 @@ public class SphereRenderer
 
             if (sd < minDist)
             {
+                // FABRIC WEAVE MICRO-DISPLACEMENT
+                if (s.materialType == WorldState.MAT_AGGREGATE_D && playerDist < 15.0f) {
+                    float weave = (float)(Math.sin(px * 40f) * Math.sin(py * 40f) * Math.sin(pz * 40f)) * 0.015f;
+                    sd += weave;
+                }
+
                 minDist = sd;
                 minMat  = s.materialType;
                 minHard = s.hardness;
@@ -279,6 +497,29 @@ public class SphereRenderer
         float dx = px - cx;
         float dy = py - cy;
         float dz = pz - cz;
+        return (float) Math.sqrt(dx*dx + dy*dy + dz*dz) - r;
+    }
+
+    /**
+     * Capsule SDF (A cylinder with rounded ends). Perfect for "soda straws".
+     * @param pa The start point of the capsule (e.g., shoulder)
+     * @param pb The end point of the capsule (e.g., hand)
+     * @param r  The radius (thickness) of the straw
+     */
+    private static float capsuleSDF(float px, float py, float pz, 
+                                    float pax, float pay, float paz, 
+                                    float pbx, float pby, float pbz, float r) {
+        float abX = pbx - pax, abY = pby - pay, abZ = pbz - paz;
+        float apX = px - pax,  apY = py - pay,  apZ = pz - paz;
+        
+        float t = (apX*abX + apY*abY + apZ*abZ) / (abX*abX + abY*abY + abZ*abZ);
+        t = Math.max(0f, Math.min(1f, t)); // clamp between 0 and 1
+        
+        float cx = pax + t * abX;
+        float cy = pay + t * abY;
+        float cz = paz + t * abZ;
+        
+        float dx = px - cx, dy = py - cy, dz = pz - cz;
         return (float) Math.sqrt(dx*dx + dy*dy + dz*dz) - r;
     }
 

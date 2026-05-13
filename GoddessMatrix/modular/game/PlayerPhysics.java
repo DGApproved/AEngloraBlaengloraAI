@@ -3,152 +3,200 @@ package modular.game;
 /*
  * PlayerPhysics.java
  *
- * Player movement and physics on the surface of a sphere.
- * Writes 3D position and camera to WorldState each logic tick.
- *
- * COORDINATES:
- *   playerAngleDeg — longitude (0-360), A/D changes this
- *   playerLatDeg   — latitude (-90 to +90), W/S changes this
- *   playerAltitude — feet above surface (0 = standing)
- *
- * CAMERA:
- *   Orbits the player at CAM_DISTANCE.
- *   world.cameraYaw and world.cameraPitch are set by IceSandbox
- *   from arrow keys or mouse. Physics reads them here to place the camera.
- *
- * GRAVITY:
- *   Scales by gravityScale per planet (Earth=1.0, Moon=0.17, Jupiter=2.53).
+ * Merged spherical movement and Geordi-glasses camera physics.
  *
  * Contributors:
  *   Gemini (Google)        — original physics concept
- *   Derek Jason Gilhousen — per-planet gravity, spherical walking design
- *   Claude (Anthropic)    — 3D position/camera implementation
+ *   Derek Jason Gilhousen — per-planet gravity, spherical walking design,
+ *                           Geordi-glasses camera model
+ *   Claude (Anthropic)    — prior 3D position/camera implementation passes
+ *   ChatGPT (OpenAI)      — merge stabilization, typo/scope repairs,
+ *                           compatibility between old/new physics APIs
+ *
+ * Merged spherical movement and Geordi-glasses camera physics.
+ * Now features dynamic Ray-Sphere terrain collision detection.
  */
 
 public class PlayerPhysics
 {
-    private static final float BASE_GRAVITY   = 0.08f;
-    private static final float JUMP_VELOCITY  = 1.2f;
+    private static final float BASE_GRAVITY = 0.08f;
+    private static final float JUMP_VELOCITY = 1.2f;
     private static final float WALK_SPEED_DEG = 1.0f;
-    private static final float CAM_DISTANCE   = 6.0f;
 
-    private float   angleDeg     = 0f;
-    private float   cameraYaw    = 0f;  // set by IceSandbox before tick()
-    private float   latDeg       = 0f;
-    private float   altitude     = 0f;
-    private float   vertVelocity = 0f;
-    private boolean jumping      = false;
+    private float angleDeg = 0f, latDeg = 0f, altitude = 0f, vertVelocity = 0f, cameraYaw = 0f;
+    private float absoluteRadius = 0f; // Tracks absolute distance from planet center
+    private boolean jumping = false;
+    private boolean moveLeft = false, moveRight = false, moveForward = false, moveBack = false;
 
-    private boolean moveLeft    = false;
-    private boolean moveRight   = false;
-    private boolean moveForward = false;
-    private boolean moveBack    = false;
-
-    public void setMoveLeft(boolean v)    { moveLeft    = v; }
-    public void setMoveRight(boolean v)   { moveRight   = v; }
+    public void setMoveLeft(boolean v) { moveLeft = v; }
+    public void setMoveRight(boolean v) { moveRight = v; }
     public void setMoveForward(boolean v) { moveForward = v; }
-    public void setMoveBack(boolean v)    { moveBack    = v; }
+    public void setMoveBack(boolean v) { moveBack = v; }
+    public void setCameraYaw(float yaw) { cameraYaw = yaw; }
+
+    public void setSpawnPosition(float latitude, float longitude)
+    {
+        latDeg = Math.max(-89.9f, Math.min(89.9f, latitude));
+        angleDeg = longitude;
+        while (angleDeg < 0f) angleDeg += 360f;
+        while (angleDeg >= 360f) angleDeg -= 360f;
+    }
 
     public void requestJump()
     {
-        if (!jumping && altitude < 0.01f)
-        {
-            jumping = true;
-            vertVelocity = JUMP_VELOCITY;
-        }
+        if (!jumping) { jumping = true; vertVelocity = JUMP_VELOCITY; }
     }
 
-    public void setCameraYaw(float yaw) { this.cameraYaw = yaw; }
-
-    public void tick(float planetRadius, float gravityScale)
+    /**
+     * Dynamically calculates the highest terrain point at the player's current lat/lon.
+     * Raycasts from the core outward to intersect any TerrainSpheres.
+     */
+    public float calculateTerrainRadius(WorldState world, float coreRadius)
     {
-        float speed = WALK_SPEED_DEG / Math.max(0.5f, planetRadius / 1.5f);
+        WorldState.SystemPlanet planet = world.planets[world.activePlanet];
+        if (planet == null || planet.terrain == null || planet.terrain.isEmpty()) return coreRadius;
 
-        // Camera-relative movement (Skyrim/Morrowind style)
-        // W/S move in camera facing direction, A/D strafe perpendicular
-        float yawRad = (float) Math.toRadians(cameraYaw);
-        float fwdAngle  =  (float) Math.sin(yawRad);
-        float fwdLat    =  (float) Math.cos(yawRad);
-        float rightAngle = (float) Math.cos(yawRad);
-        float rightLat  = -(float) Math.sin(yawRad);
+        float latRad = (float) Math.toRadians(latDeg);
+        float lonRad = (float) Math.toRadians(angleDeg);
 
-        if (moveForward) { angleDeg += fwdAngle * speed;  latDeg += fwdLat * speed;   }
-        if (moveBack)    { angleDeg -= fwdAngle * speed;  latDeg -= fwdLat * speed;   }
-        if (moveRight)   { angleDeg += rightAngle * speed; latDeg += rightLat * speed; }
-        if (moveLeft)    { angleDeg -= rightAngle * speed; latDeg -= rightLat * speed; }
+        // Normalized outward vector at player's coordinates
+        float vx = (float)(Math.cos(latRad) * Math.sin(lonRad));
+        float vy = (float) Math.sin(latRad);
+        float vz = (float)(Math.cos(latRad) * Math.cos(lonRad));
 
-        if (angleDeg <    0) angleDeg += 360f;
-        if (angleDeg >= 360) angleDeg -= 360f;
-        latDeg = Math.max(-89.9f, Math.min(89.9f, latDeg));
+        float maxRadius = coreRadius;
 
-        if (jumping || altitude > 0)
+        for (WorldState.TerrainSphere s : planet.terrain)
         {
-            altitude     += vertVelocity;
-            vertVelocity -= BASE_GRAVITY * gravityScale;
-            if (altitude <= 0)
-            {
-                altitude = 0; jumping = false; vertVelocity = 0;
+            if (s.materialType == WorldState.MAT_VOID) continue;
+            
+            // Ray-Sphere Intersection Math
+            float tc = s.x * vx + s.y * vy + s.z * vz;
+            if (tc < 0) continue; // Sphere is behind the core relative to player
+
+            float d2 = (s.x*s.x + s.y*s.y + s.z*s.z) - (tc*tc);
+            float r2 = s.radius * s.radius;
+
+            if (d2 <= r2) {
+                // Ray hits the sphere. Calculate the highest protruding point.
+                float hitRadius = tc + (float)Math.sqrt(r2 - d2);
+                if (hitRadius > maxRadius) {
+                    maxRadius = hitRadius;
+                }
             }
         }
+        return maxRadius;
     }
 
-    public void writeToWorld(WorldState world, float planetRadius)
+    public void tick(float localFloorRadius, float gravityScale)
     {
-        world.playerAngleDeg     = angleDeg;
-        world.playerLatDeg       = latDeg;
-        world.playerAltitudeFeet = altitude;
-        world.isJumping          = jumping;
-        world.verticalVelocity   = vertVelocity;
+        float speed = WALK_SPEED_DEG / Math.max(0.5f, localFloorRadius / 1.5f);
+        float yawRad = (float)Math.toRadians(cameraYaw);
+        float fwdAngle = (float)Math.sin(yawRad), fwdLat = (float)Math.cos(yawRad);
+        float rightAngle = (float)Math.cos(yawRad), rightLat = -(float)Math.sin(yawRad);
 
-        float r      = planetRadius + altitude;
-        float latRad = (float) Math.toRadians(latDeg);
-        float angRad = (float) Math.toRadians(angleDeg);
+        if (moveForward) { angleDeg += fwdAngle * speed; latDeg += fwdLat * speed; }
+        if (moveBack) { angleDeg -= fwdAngle * speed; latDeg -= fwdLat * speed; }
+        if (moveRight) { angleDeg += rightAngle * speed; latDeg += rightLat * speed; }
+        if (moveLeft) { angleDeg -= rightAngle * speed; latDeg -= rightLat * speed; }
+        wrapClampSurface();
 
-        // Player 3D position
+        // Initialize absolute radius on first frame
+        if (absoluteRadius < 0.1f) {
+            absoluteRadius = localFloorRadius;
+        }
+
+        // Apply vertical momentum
+        absoluteRadius += vertVelocity;
+
+        // Collision detection against the dynamic terrain floor
+        if (absoluteRadius > localFloorRadius)
+        {
+            // In the air: apply gravity
+            vertVelocity -= BASE_GRAVITY * gravityScale;
+            jumping = true;
+        }
+        else
+        {
+            // Hit the ground (acts as an automatic stair-stepper for rising terrain)
+            absoluteRadius = localFloorRadius;
+            vertVelocity = 0f;
+            jumping = false;
+        }
+
+        altitude = absoluteRadius - localFloorRadius;
+    }
+
+    private void wrapClampSurface()
+    {
+        while (angleDeg < 0f) angleDeg += 360f;
+        while (angleDeg >= 360f) angleDeg -= 360f;
+        latDeg = Math.max(-89.9f, Math.min(89.9f, latDeg));
+    }
+
+    public void writeToWorld(WorldState world, float floorRadius)
+    {
+        world.playerAngleDeg = angleDeg; 
+        world.playerLatDeg = latDeg; 
+        world.playerAltitudeFeet = altitude; // purely for debug display now
+        world.isJumping = jumping; 
+        world.verticalVelocity = vertVelocity;
+
+        // Use the absolute radius directly for exact visual placement!
+        float r = absoluteRadius; 
+        float latRad = (float)Math.toRadians(latDeg), angRad = (float)Math.toRadians(angleDeg);
         float px = r * (float)(Math.cos(latRad) * Math.sin(angRad));
-        float py = r * (float) Math.sin(latRad);
+        float py = r * (float)Math.sin(latRad);
         float pz = r * (float)(Math.cos(latRad) * Math.cos(angRad));
+        world.playerPos[0] = px; world.playerPos[1] = py; world.playerPos[2] = pz;
 
-        // Local frame at surface position
         float outX = (float)(Math.cos(latRad) * Math.sin(angRad));
-        float outY = (float) Math.sin(latRad);
+        float outY = (float)Math.sin(latRad);
         float outZ = (float)(Math.cos(latRad) * Math.cos(angRad));
-
         float northX = (float)(-Math.sin(latRad) * Math.sin(angRad));
-        float northY = (float) Math.cos(latRad);
+        float northY = (float)Math.cos(latRad);
         float northZ = (float)(-Math.sin(latRad) * Math.cos(angRad));
+        float eastX = (float)Math.cos(angRad), eastY = 0f, eastZ = -(float)Math.sin(angRad);
 
-        float eastX =  (float) Math.cos(angRad);
-        float eastY =  0f;
-        float eastZ = -(float) Math.sin(angRad);
+        float headH = world.playerHeightFeet;
+        float headX = px + outX * headH, headY = py + outY * headH, headZ = pz + outZ * headH;
+        float pitchRad = (float)Math.toRadians(world.cameraPitch), yawRad = (float)Math.toRadians(world.cameraYaw);
+        float viewLocalEast = (float)(Math.cos(pitchRad) * Math.sin(yawRad));
+        float viewLocalOut = (float)Math.sin(pitchRad);
+        float viewLocalNorth = (float)(Math.cos(pitchRad) * Math.cos(yawRad));
+        float viewWorldX = viewLocalEast * eastX + viewLocalNorth * northX + viewLocalOut * outX;
+        float viewWorldY = viewLocalEast * eastY + viewLocalNorth * northY + viewLocalOut * outY;
+        float viewWorldZ = viewLocalEast * eastZ + viewLocalNorth * northZ + viewLocalOut * outZ;
 
-        // Camera orbit using world.cameraYaw and world.cameraPitch
-        float pitchRad   = (float) Math.toRadians(world.cameraPitch);
-        float yawRad     = (float) Math.toRadians(world.cameraYaw);
-        float horizDist  = CAM_DISTANCE * (float) Math.cos(pitchRad);
-        float vertDist   = CAM_DISTANCE * (float) Math.sin(pitchRad);
-        float localEast  =  horizDist * (float) Math.sin(yawRad);
-        float localNorth = -horizDist * (float) Math.cos(yawRad);
+        if (world.isFirstPerson)
+        {
+            world.camPos[0] = headX; world.camPos[1] = headY; world.camPos[2] = headZ;
+            world.camTarget[0] = headX + viewWorldX * 100f;
+            world.camTarget[1] = headY + viewWorldY * 100f;
+            world.camTarget[2] = headZ + viewWorldZ * 100f;
+        }
+        else
+        {
+            float phoneDistance = 2.5f;
+            world.camPos[0] = headX + viewWorldX * phoneDistance;
+            world.camPos[1] = headY + viewWorldY * phoneDistance;
+            world.camPos[2] = headZ + viewWorldZ * phoneDistance;
+            world.camTarget[0] = headX;
+            world.camTarget[1] = headY;
+            world.camTarget[2] = headZ;
+        }
 
-        world.camPos[0] = px + localEast*eastX + localNorth*northX + vertDist*outX;
-        world.camPos[1] = py + localEast*eastY + localNorth*northY + vertDist*outY;
-        world.camPos[2] = pz + localEast*eastZ + localNorth*northZ + vertDist*outZ;
-
-        float headH = world.playerHeightFeet * 0.35f;
-        world.camTarget[0] = px + outX * headH;
-        world.camTarget[1] = py + outY * headH;
-        world.camTarget[2] = pz + outZ * headH;
-
-        // Avatar companion slightly ahead
-        float aheadRad = (float) Math.toRadians(angleDeg + 15f);
-        float ar = planetRadius + 0.1f;
+        // Avatar Companion also snaps to the terrain
+        float aheadRad = (float)Math.toRadians(angleDeg + 15f);
+        float ar = absoluteRadius + 0.1f; 
+        world.avatarAngleDeg = angleDeg + 15f; world.avatarLatDeg = latDeg;
         world.avatarPos[0] = ar * (float)(Math.cos(latRad) * Math.sin(aheadRad));
-        world.avatarPos[1] = ar * (float) Math.sin(latRad);
+        world.avatarPos[1] = ar * (float)Math.sin(latRad);
         world.avatarPos[2] = ar * (float)(Math.cos(latRad) * Math.cos(aheadRad));
     }
 
-    public float   getAngleDeg() { return angleDeg; }
-    public float   getLatDeg()   { return latDeg; }
-    public float   getAltitude() { return altitude; }
-    public boolean isJumping()   { return jumping; }
+    public float getAngleDeg() { return angleDeg; }
+    public float getLatDeg() { return latDeg; }
+    public float getAltitude() { return altitude; }
+    public boolean isJumping() { return jumping; }
 }
