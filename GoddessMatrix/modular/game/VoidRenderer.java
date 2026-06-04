@@ -185,82 +185,67 @@ public class VoidRenderer
 
     // ── ACTIVE PLANET NODES ───────────────────────────────────────────────────
 
-    private void renderOtherPlanets(Graphics2D g, WorldState world, int W, int H) 
+private void renderOtherPlanets(Graphics2D g, WorldState world, int W, int H) 
     {
-        // 1. Calculate camera basis vectors
         float[] cam = world.camPos;
         float[] tgt = world.camTarget;
         
-        // Forward vector
-        float fx = tgt[0] - cam[0];
-        float fy = tgt[1] - cam[1];
-        float fz = tgt[2] - cam[2];
+        float fx = tgt[0] - cam[0]; float fy = tgt[1] - cam[1]; float fz = tgt[2] - cam[2];
         float flen = (float) Math.sqrt(fx*fx + fy*fy + fz*fz);
         if (flen < 0.0001f) return;
         fx /= flen; fy /= flen; fz /= flen;
 
-        // Right vector (cross Forward with global Up [0,1,0])
-        float rx = fy * 0f - fz * 1f;
-        float ry = fz * 0f - fx * 0f;
-        float rz = fx * 1f - fy * 0f;
+        float rx = fy * 0f - fz * 1f; float ry = fz * 0f - fx * 0f; float rz = fx * 1f - fy * 0f;
         float rlen = (float) Math.sqrt(rx*rx + ry*ry + rz*rz);
-        if (rlen < 0.0001f) { rx = 1f; ry = 0f; rz = 0f; } // fallback
+        if (rlen < 0.0001f) { rx = 1f; ry = 0f; rz = 0f; } 
         else { rx /= rlen; ry /= rlen; rz /= rlen; }
 
-        // True Up vector (cross Right with Forward)
-        float ux = ry * fz - rz * fy;
-        float uy = rz * fx - rx * fz;
-        float uz = rx * fy - ry * fx;
+        float ux = ry * fz - rz * fy; float uy = rz * fx - rx * fz; float uz = rx * fy - ry * fx;
 
         float aspect = (float) W / H;
         float tanFOV = (float) Math.tan(Math.toRadians(world.camFOV * 0.5));
 
         for (int i = 1; i <= 12; i++) 
         {
-            if (i == world.activePlanet) continue; // Skip current planet
-            if (i == WorldState.FN_ASTEROID_BELT) continue; // Debris field, no core body
+            if (i == world.activePlanet || i == WorldState.FN_ASTEROID_BELT) continue; 
             
             float[] targetPos = planetWorldPos(world, i);
-            
-            // Vector from camera to target planet
-            float dx = targetPos[0] - cam[0];
-            float dy = targetPos[1] - cam[1];
-            float dz = targetPos[2] - cam[2];
-
-            // Project onto camera's Forward vector (Depth)
+            float dx = targetPos[0] - cam[0]; float dy = targetPos[1] - cam[1]; float dz = targetPos[2] - cam[2];
             float depth = dx * fx + dy * fy + dz * fz;
             
-            // If planet is behind the camera, clip it
             if (depth < 0.1f) continue;
 
-            // Project onto camera's Right and Up vectors
             float rightOffset = dx * rx + dy * ry + dz * rz;
             float upOffset    = dx * ux + dy * uy + dz * uz;
 
-            // Perspective division
             float screenX = rightOffset / (depth * tanFOV * aspect);
-            float screenY = -upOffset   / (depth * tanFOV); // Invert Y for 2D screen
+            float screenY = -upOffset   / (depth * tanFOV); 
 
-            // Map to panel pixel coordinates
             int sx = (int) ((screenX * 0.5f + 0.5f) * W);
             int sy = (int) ((screenY * 0.5f + 0.5f) * H);
             
-            // Apparent radius based on distance and body type
+            // ── DATA-DRIVEN SCALING ──
+            WorldState.SystemPlanet p = world.planets[i];
+            int dataSize = (p != null) ? p.bedrockCount : 1;
+            // More .txt files = exponentially larger radius in the sky
+            float dataScale = 1.0f + (float)Math.log10(dataSize) * 0.85f; 
+
             float baseRadius = (i == WorldState.FN_SUN) ? 120f : 40f;
-            int radius = Math.max(2, (int)((baseRadius / depth) * H * 0.5f)); 
+            int radius = Math.max(2, (int)((baseRadius * dataScale / depth) * H * 0.5f)); 
 
-            // Cull if off screen entirely (with a small margin)
-            if (sx < -radius || sx > W + radius || sy < -radius || sy > H + radius) continue;
+            if (sx < -radius*3 || sx > W + radius*3 || sy < -radius*3 || sy > H + radius*3) continue;
 
-            // Draw the celestial body
             if (i == WorldState.FN_SUN) {
-                // Sun glow
-                g.setColor(new Color(255, 200, 100, 80));
+                // Sun color shifts from yellow to intense white/blue based on fn1 data load
+                int cR = Math.max(200, 255 - (dataSize / 2));
+                int cG = Math.min(255, 200 + (dataSize * 2));
+                int cB = Math.min(255, 100 + (dataSize * 3));
+
+                g.setColor(new Color(cR, cG, cB, 80));
                 g.fillOval(sx - radius*2, sy - radius*2, radius*4, radius*4);
-                g.setColor(new Color(255, 240, 200, 240));
+                g.setColor(new Color(255, 250, 240, 240)); 
                 g.fillOval(sx - radius, sy - radius, radius*2, radius*2);
             } else {
-                // Standard planet
                 g.setColor(new Color(157, 80, 187, 220)); 
                 g.fillOval(sx - radius, sy - radius, radius*2, radius*2);
             }

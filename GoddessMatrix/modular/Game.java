@@ -83,27 +83,57 @@ public class Game
 
                 sandboxInstance = new IceSandbox(gameDir, dgapiSys, true);
 
-                // [APIBRIGE HOOK] — uncomment when ready:
-                // state.gameProtocol = sandboxInstance.getProtocol();
+                state.sandboxInstance = sandboxInstance;
 
                 // Embed in the ImageViewer manifest panel
                 if (state.imageViewer != null)
                 {
+                    state.isGameModeActive = true;
+
+                    // ── REGISTER KEY HOOK ────────────────────────────────────
+                    final IceSandbox sb = sandboxInstance;
+                    state.keyHook = e -> {
+                        if (!state.isGameModeActive) return false;
+                        if (e.getID() == java.awt.event.KeyEvent.KEY_PRESSED)
+                            sb.keyPressed(e);
+                        else if (e.getID() == java.awt.event.KeyEvent.KEY_RELEASED)
+                            sb.keyReleased(e);
+                        else if (e.getID() == java.awt.event.KeyEvent.KEY_TYPED)
+                            sb.keyTyped(e);
+                        return state.imageViewerMaximized;
+                    };
+
+                    // ── WIRE CAPABILITY HOOKS INTO PROTOCOL ───────────────────
+                    // GameProtocol receives Matrix capabilities through hooks —
+                    // it never imports system/* directly.
+                    modular.game.GameProtocol proto = sandboxInstance.getProtocol();
+                    proto.setAISendHook(state.aiSendHook);
+                    proto.setErrorHook(state.errorHook);
+                    proto.setChatHook(state.chatSystemHook);
+
+                    // ── REGISTER AI RESPONSE HOOK ─────────────────────────────
+                    // ApiBridge calls this for every [GAME_*] [WORLD_*] [ENTITY_*]
+                    // [PANEL_*] line from GoddessAPI. Routes to protocol.handleTag()
+                    // so all AI responses reach the game cleanly.
+                    state.aiResponseHook = line -> {
+                        try { proto.handleTag(line); }
+                        catch (Exception e) {
+                            if (state.errorHook != null)
+                                state.errorHook.log("GameProtocol.handleTag", e);
+                        }
+                    };
+
                     state.imageViewer.startGameMode(sandboxInstance);
                     sandboxInstance.startEngine();
-
-                    state.isGameModeActive = true;
 
                     PrintWriter stdin = state.apiStdinMap.get(state.currentSession);
                     if (stdin != null) sandboxInstance.getProtocol().setPythonStdin(stdin);
                     state.gameProtocol = sandboxInstance.getProtocol();
 
-                    // Clicking the ESC overlay rate display exits fullscreen
-                    // (restores manifest from cinematic passthrough mode).
-                    // In standalone mode the callback exits entirely instead.
-                    sandboxInstance.setFullscreenExitCallback(
-                        () -> state.imageViewer.restoreManifest()
-                    );
+                    sandboxInstance.setFullscreenExitCallback(() -> {
+                        state.imageViewerMaximized = false;
+                        state.imageViewer.restoreManifest();
+                    });
 
                     if (state.statusLabel != null)
                         state.statusLabel.setText("SYS_GAME: ACTIVE | DBL-CLICK MANIFEST TO EXPAND");
@@ -121,11 +151,17 @@ public class Game
             }
             catch (Exception e)
             {
+                // Game is a modular feature — fault-isolate so Matrix keeps running.
+                // Full stack trace stored as clickable [rawdat_crash_log] in chat.
                 if (state.chatHistory != null)
-                    state.chatHistory.appendError("GAME_ENGINE_FAILED: " + e.getMessage());
+                    state.chatHistory.logModularCrash("Game Engine", e);
                 if (state.statusLabel != null)
-                    state.statusLabel.setText("SYS_GAME: LAUNCH_FAILED");
-                sandboxInstance = null;
+                    state.statusLabel.setText("SYS_GAME: FAULT — see [rawdat_crash_log]");
+                sandboxInstance            = null;
+                state.sandboxInstance      = null;
+                state.gameProtocol         = null;
+                state.imageViewerMaximized = false;
+                state.isGameModeActive     = false;
             }
         });
     }
@@ -142,9 +178,13 @@ public class Game
             state.imageViewer.stopGameMode();
         }
         
-        state.isGameModeActive = false;
-        // [APIBRIGE HOOK] — uncomment when ready:
-        // state.gameProtocol = null;
+        state.isGameModeActive     = false;
+        state.sandboxInstance      = null;
+        state.gameProtocol         = null;
+        state.imageViewerMaximized = false;
+        state.keyHook              = null;
+        state.aiResponseHook       = null;
+        state.isAIProcessing       = false;
 
         if (state.chatHistory != null)
             state.chatHistory.appendSystem("GAME_ENGINE: SESSION_ENDED");
@@ -168,8 +208,11 @@ public class Game
             @Override public void windowClosed(java.awt.event.WindowEvent e)
             {
                 sandbox.stopEngine();
-                sandboxInstance = null;
-                state.isGameModeActive = false;
+                sandboxInstance            = null;
+                state.sandboxInstance      = null;
+                state.gameProtocol         = null;
+                state.imageViewerMaximized = false;
+                state.isGameModeActive     = false;
             }
         });
         frame.setVisible(true);

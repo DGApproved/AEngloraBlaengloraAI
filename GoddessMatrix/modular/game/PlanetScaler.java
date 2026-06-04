@@ -70,7 +70,7 @@ public class PlanetScaler
         int spheresAtTier = 1;
         while (spheresAtTier < bedrockCount)
         {
-            if (WorldState.tierBreachesMinimum(scaleTier + 1, worldScaleMultiplier))
+            if (WorldState.miniTierSphereSizes(scaleTier + 1, worldScaleMultiplier))
             {
                 // World doubles, tier resets
                 worldScaleMultiplier *= 2.0f;
@@ -84,7 +84,7 @@ public class PlanetScaler
             }
         }
 
-        float diameter = WorldState.sphereDiameterAtTier(scaleTier, worldScaleMultiplier);
+        float diameter = WorldState.scaledSphereDiameter(scaleTier, worldScaleMultiplier);
         currentSphereRadius = diameter / 2f;
     }
 

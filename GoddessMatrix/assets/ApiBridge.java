@@ -137,19 +137,29 @@ public class ApiBridge {
     }
 
     private File resolveAPIBinary(boolean useDeepAILocalization) {
+        File osFolder = getOSScriptFolderFile();
+
         if (useDeepAILocalization) {
+            // FN+AI: Python path.
+            // Priority: osDev sandbox → OS-specific GoddessAPI.py in scripts/<OS>/
+            //           → shared GoddessAPI.py at AI home root.
+            // The OS-specific .py uses platform hardware APIs (sysctl/WMI/proc).
             File deep = new File(state.osDevAIBin, "GoddessAPI.py");
             if (deep.exists()) return deep;
 
-            File standard = new File(getOSScriptFolderFile(), "GoddessAPI.py");
-            if (standard.exists()) return standard;
+            File osSpecific = new File(osFolder, "GoddessAPI.py");
+            if (osSpecific.exists()) return osSpecific;
+
+            File root = new File(state.aiHomeDirectory, "GoddessAPI.py");
+            if (root.exists()) return root;
 
             return null;
         }
 
+        // AI button (not FN+AI): native shell for this OS.
         String scriptName = state.isWindows ? "GoddessAPI.bat" : "GoddessAPI.sh";
 
-        File standard = new File(getOSScriptFolderFile(), scriptName);
+        File standard = new File(osFolder, scriptName);
         if (standard.exists()) return standard;
 
         File local = new File(state.aiHomeDirectory, scriptName);
@@ -294,23 +304,18 @@ public class ApiBridge {
 
             } else if (line.startsWith("[WORLD_") || line.startsWith("[GAME_") ||
                     line.startsWith("[ENTITY_") || line.startsWith("[PANEL_")) {
+                // Also call aiResponseHook if a modular feature has registered one
+                if (state.aiResponseHook != null) {
+                    try { state.aiResponseHook.onLine(line); }
+                    catch (Exception ignored) {}
+                }
                 // ── GAME PROTOCOL DISPATCH ────────────────────────────────────
                 // Routes game tags to the active IceSandbox GameProtocol instance.
                 // state.gameProtocol is set by modular.Game on launch, null otherwise.
                 // Safe to call when game is not running — instanceof check guards it.
-                //direct cast method
-                //if (state.gameProtocol instanceof modular.game.GameProtocol) {
-                //    ((modular.game.GameProtocol) state.gameProtocol).handleTag(line);
-                //}
-                //reflection call method
-                if (state.gameProtocol != null) {
-                    try {
-                        state.gameProtocol.getClass()
-                            .getMethod("handleTag", String.class)
-                            .invoke(state.gameProtocol, line);
-                    } catch (Exception ignored) {}
+                if (state.gameProtocol instanceof modular.game.GameProtocol) {
+                    ((modular.game.GameProtocol) state.gameProtocol).handleTag(line);
                 }
-
 
             } else if (line.startsWith("[")) {
                 if (state.chatHistory != null) {

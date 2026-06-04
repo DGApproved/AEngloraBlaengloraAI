@@ -14,7 +14,6 @@ package assets;
  * Design:
  * - no dependency on modular/*
  * - minimal assumptions about environment
- * - Cross-Platform Bridge: dynamically translates Linux commands and routes scripts
  */
 
 import system.MatrixState;
@@ -33,34 +32,81 @@ public class TerminalRunner {
     // ─────────────────────────────────────────────
     // EXTERNAL TERMINAL LAUNCH (NTR)
     // ─────────────────────────────────────────────
-    public void launchExternalTerminal(boolean asChroot, File targetDir) {
+    public void launchExternalTerminal(boolean asChroot) {
         try {
-            File dir = resolveTargetDirectory(asChroot, targetDir);
+            ProcessBuilder pb;
 
-            String[] cmd;
+            if (asChroot) {
+                // 1. Resolve script directory via state OS flags
+                File scriptDir = state.uiWindow != null
+                        ? state.uiWindow.getOSScriptFolderFile()
+                        : new File(state.scriptRootDirectory,
+                            state.isWindows ? "Windows" : (state.isMac ? "MacOSY" : "Linux"));
+                scriptDir.mkdirs();
 
-            if (state.isWindows) {
-                // 'start cmd.exe' physically opens a new visible command prompt window
-                cmd = new String[]{"cmd.exe", "/c", "start", "cmd.exe"};
-            } else if (state.isMac) {
-            	// macOS native visible terminal
-            	cmd = new String[] {"open", "-a", "Terminal", dir.getAbsolutePath()};
+                File chrootScript = new File(scriptDir, "chroot_env.sh");
+
+                // 2. Generate chroot script dynamically if missing
+                if (!chrootScript.exists() && state.osDevDir != null) {
+                    String scriptContent =
+                            "#!/bin/bash\n" +
+                            "CHROOT_DIR=\"" + state.osDevDir.getAbsolutePath() + "\"\n" +
+                            "echo 'SYSTEM> MOUNTING CHROOT VOLUMES...'\n" +
+                            "sudo mount -t proc /proc \"$CHROOT_DIR/proc\"\n" +
+                            "sudo mount -t sysfs /sys \"$CHROOT_DIR/sys\"\n" +
+                            "sudo mount -o bind /dev \"$CHROOT_DIR/dev\"\n" +
+                            "sudo mount -o bind /dev/pts \"$CHROOT_DIR/dev/pts\"\n" +
+                            "echo 'SYSTEM> ENTERING CHROOT ENVIRONMENT...'\n" +
+                            "sudo chroot \"$CHROOT_DIR\" /bin/bash\n" +
+                            "echo 'SYSTEM> CHROOT EXITED. UNMOUNTING VOLUMES...'\n" +
+                            "sudo umount \"$CHROOT_DIR/dev/pts\"\n" +
+                            "sudo umount \"$CHROOT_DIR/dev\"\n" +
+                            "sudo umount \"$CHROOT_DIR/sys\"\n" +
+                            "sudo umount \"$CHROOT_DIR/proc\"\n" +
+                            "echo 'SYSTEM> CLEANUP COMPLETE. CLOSING TERMINAL.'\n" +
+                            "sleep 2\n";
+                    java.nio.file.Files.write(chrootScript.toPath(), scriptContent.getBytes());
+                    chrootScript.setExecutable(true);
+                }
+
+                // 3. Launch via state OS flags — no inline os.name needed
+                if (state.isWindows) {
+                    pb = new ProcessBuilder("cmd.exe", "/c", "start", "wsl.exe",
+                            "--exec", "bash", chrootScript.getAbsolutePath());
+                    if (state.chatHistory != null)
+                        state.chatHistory.appendSystem("LAUNCHING WSL CHROOT BRIDGE...");
+                } else if (state.isMac) {
+                    pb = new ProcessBuilder("open", "-a", "Terminal",
+                            chrootScript.getAbsolutePath());
+                } else {
+                    pb = new ProcessBuilder("x-terminal-emulator", "-e",
+                            chrootScript.getAbsolutePath());
+                    if (state.chatHistory != null)
+                        state.chatHistory.appendSystem("LAUNCHING EXTERNAL CHROOT TERMINAL...");
+                }
             } else {
-                // Linux / Mac fallback
-                cmd = new String[]{
-                        "x-terminal-emulator",
-                        "--working-directory=" + dir.getAbsolutePath()
-                };
+                // Standard terminal — use state OS flags
+                if (state.isWindows) {
+                    pb = new ProcessBuilder("cmd.exe", "/c", "start", "cmd.exe");
+                } else if (state.isMac) {
+                    pb = new ProcessBuilder("open", "-a", "Terminal");
+                } else {
+                    pb = new ProcessBuilder("x-terminal-emulator");
+                }
             }
-
-            new ProcessBuilder(cmd)
-                    .directory(dir)
-                    .start();
-
-            setStatus("SYS_EXEC: TERMINAL_LAUNCHED");
-
+            
+            // 4. Safely pull the working directory from the MatrixState
+            pb.directory(state.currentWorkingDirectory);
+            pb.start();
+            
+            // 5. Use the local setStatus helper
+            setStatus(asChroot ? "SYS_EXEC: CHROOT_TERMINAL_OPEN" : "SYS_EXEC: TERMINAL_OPENED");
+            
         } catch (Exception e) {
-            setStatus("SYS_EXEC: TERMINAL_FAIL");
+            setStatus("SYS_EXEC: FAILED");
+            if (state.chatHistory != null) {
+                state.chatHistory.appendError("TERMINAL_LAUNCH_FAILED: " + e.getMessage());
+            }
         }
     }
 
@@ -79,15 +125,12 @@ public class TerminalRunner {
             ProcessBuilder pb;
 
             if (state.isWindows) {
-                String translatedCommand = translateCommandForWindows(command);
-                pb = new ProcessBuilder("cmd.exe", "/c", translatedCommand);
+                pb = new ProcessBuilder("cmd.exe", "/c", command);
             } else {
                 pb = new ProcessBuilder("bash", "-c", command);
             }
 
             pb.directory(state.currentWorkingDirectory);
-            // Redirecting error stream ensures hidden failures are caught by your loggers
-            pb.redirectErrorStream(true); 
             pb.start();
 
             setStatus("SYS_EXEC: CMD_SENT");
@@ -98,21 +141,19 @@ public class TerminalRunner {
     }
 
     // ─────────────────────────────────────────────
-    // SCRIPT MODE EXECUTION (Inline / Direct)
+    // SCRIPT MODE EXECUTION
     // ─────────────────────────────────────────────
     public void executeDirectScript(String command) {
         try {
             ProcessBuilder pb;
 
             if (state.isWindows) {
-                String translatedCommand = translateCommandForWindows(command);
-                pb = new ProcessBuilder("cmd.exe", "/c", translatedCommand);
+                pb = new ProcessBuilder("cmd.exe", "/c", command);
             } else {
-                pb = new ProcessBuilder("bash", "-c", command); // Added -c to properly execute string commands in bash
+                pb = new ProcessBuilder("bash", command);
             }
 
             pb.directory(state.currentWorkingDirectory);
-            pb.redirectErrorStream(true);
             pb.start();
 
             setStatus("SYS_SCRIPT: EXECUTED");
@@ -141,24 +182,12 @@ public class TerminalRunner {
             ProcessBuilder pb;
 
             if (state.isWindows) {
-                // Smart Script Routing for Windows 11
-                String path = scriptFile.getAbsolutePath();
-                if (scriptName.endsWith(".py")) {
-                    pb = new ProcessBuilder("python", path);
-                } else if (scriptName.endsWith(".sh")) {
-                    // Leverages Windows 11 WSL or Git Bash alias if available
-                    pb = new ProcessBuilder("bash", path);
-                } else {
-                    // Default fallback for .bat or general executables
-                    pb = new ProcessBuilder("cmd.exe", "/c", path);
-                }
+                pb = new ProcessBuilder("cmd.exe", "/c", scriptFile.getAbsolutePath());
             } else {
-                // Linux native execution
                 pb = new ProcessBuilder("bash", scriptFile.getAbsolutePath());
             }
 
             pb.directory(scriptDir);
-            pb.redirectErrorStream(true);
             pb.start();
 
             setStatus("SYS_SCRIPT: LAUNCHED");
@@ -166,33 +195,6 @@ public class TerminalRunner {
         } catch (Exception e) {
             setStatus("SYS_SCRIPT: FAIL");
         }
-    }
-
-    // ─────────────────────────────────────────────
-    // WINDOWS COMMAND TRANSLATION LAYER
-    // ─────────────────────────────────────────────
-    private String translateCommandForWindows(String command) {
-        String trimmed = command.trim();
-        
-        // Basic Linux -> DOS translation mapping
-        if (trimmed.equals("ls") || trimmed.startsWith("ls ")) {
-            return trimmed.replaceFirst("^ls", "dir");
-        } else if (trimmed.equals("pwd")) {
-            return "cd"; // typing 'cd' without args in cmd prints the working directory
-        } else if (trimmed.equals("clear")) {
-            return "cls";
-        } else if (trimmed.startsWith("rm -rf ")) {
-            return trimmed.replaceFirst("^rm -rf ", "rmdir /s /q ");
-        } else if (trimmed.startsWith("rm ")) {
-            return trimmed.replaceFirst("^rm ", "del ");
-        } else if (trimmed.startsWith("cp ")) {
-            return trimmed.replaceFirst("^cp ", "copy ");
-        } else if (trimmed.startsWith("mv ")) {
-            return trimmed.replaceFirst("^mv ", "move ");
-        }
-        
-        // If no translation rule matches, pass it through raw
-        return command;
     }
 
     // ─────────────────────────────────────────────
