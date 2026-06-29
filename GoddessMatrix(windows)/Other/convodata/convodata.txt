@@ -1,0 +1,2 @@
+MANIFEST_IMAGE: fn1-cd-20260629_070249.png
+API_STDOUT> bash: GoddessAPI: command not found

@@ -1,0 +1,431 @@
+================================================================================
+GODDESS MATRIX — GAME ENGINE CONTRIBUTORS
+Project by Derek Jason Gilhousen
+
+This file documents contributions to the Goddess Matrix game engine and its
+associated systems. Each contributor section lists specific work done and the
+creative or technical direction that shaped it.
+================================================================================
+DEREK JASON GILHOUSEN — Project Author & Director
+
+Originated and directed all aspects of the project. All technical work by other
+contributors was done in response to Derek's specifications and design intent.
+
+WORLD DESIGN & PHILOSOPHY
+
+    Conceived the sphere world model: player stands on a small planet whose
+    size is determined by the file count of the knowledge system
+
+    Designed the material philosophy: each character in each knowledge file
+    maps to a sphere; file type determines material category;
+    character type determines hardness
+
+    Established .java files as BEDROCK — the hardest material, the skeleton
+    of the system
+
+    Designed the scale tier system: logarithmic from file count to planet
+    diameter, BASE_DIAMETER=3ft, player reference height 5.5ft
+
+    Designed the celestial map: fn1-fn12 named as Sun through Kuiper Anomaly
+
+AENGLORIA TIME SYSTEM
+
+    Created the 26-hour / 81-minute / 81-second time system
+
+    Designed the three clock modes: Standard, Hybrid (mechanical drift feature),
+    and Pure Aengloria
+
+    Specified that all three modes synchronize at midnight
+
+    Identified that the hybrid second hand oscillating between 0-59 and 0-80
+    represents intentional mechanical drift, not an error
+
+    Directed that the clock drives in-game physics in 81-base mode
+
+    Specified that the 81ms game tick carries the same numerical DNA as the
+    Aengloria time system
+
+CALENDAR SYSTEMS
+
+    Designed the three calendar modes: Standard Gregorian, Celestial/Aenglorian
+    (13 months on leap years), Cotsworth Perpetual (always 13 months)
+
+    Directed integration of calendar into the in-game sidebar
+
+CAMERA & CONTROLS
+
+    Specified the Skyrim/Morrowind hybrid camera model
+
+    Directed: mouse always active for look, right mouse for free orbit,
+    scroll wheel for zoom, WASD camera-relative movement
+
+    Specified mouse release behavior: ESC, E, and C key each release the mouse
+    for UI interaction; mouse recapture logic owned by KeyState
+
+    Specified that clicking outside the chatbox closes it and recaptures
+
+    Directed that the chatbox be semi-transparent so the world remains visible
+
+SIDEBAR PANELS
+
+    Designed the four-panel layout (TOP: clock, RIGHT: calendar/minigames,
+    LEFT: options, BOTTOM: inventory)
+
+    Specified all three clock modes visible simultaneously in the top panel
+
+    Directed the midnight sync indicator
+
+    Specified that the drift second display use brackets [60] in hybrid mode
+
+MINIGAME SYSTEM
+
+    Directed that HTML files in the html/ folder be scanned and their mechanics
+    expressed natively in 3D rather than opening a browser window
+
+    Established the unlock sequence: SIGNAL always available → DECRYPT needs
+    noise → WEAVE needs threads → SANCTUARY/CLOCK need artifacts
+
+    Confirmed the resource loop: entropy → noise → threads → artifacts
+
+    Specified that no popup windows of any kind be created; all mechanics
+    render as overlays within the game viewport
+
+RESOURCE ECONOMY (from Aengloria predecessor)
+
+    Designed the Blue (Logic) / Gold (Love) thread economy
+
+    Designed market-based transmutation: exchange rate driven by historical
+    blue/gold ratio
+
+    Designed the crafting recipes: Pancake 1B+3G, Logic Gate 3B+1G,
+    Dream Catcher 2B+2G, Happy Mac 2B+4G
+
+    Designed the Sanctuary mechanic: entropy vs insight, Hammer vs Headdress,
+    strain accumulates from overuse of force
+
+    Designed the Harmony Engine clock mechanic: two rings at different speeds
+    matching the dual-clock physics
+
+AENGLORIA PREDECESSOR SYSTEM
+
+    Built the original Aengloria system: visual_cortex.py pixel memory,
+    entropy_engine.c, weaver_reflex.asm, temporal_math.asm, goddess_shell.c,
+    celestial_gui.c, celestial_calendar.c, launch_board.c, subconscious.c,
+    optic_weaver.py, synth.c, drift.c, chamber.sh
+
+    Established the pixel memory system: Blue=logic events, Gold=love events,
+    ratio drives mood state, each alchemy creates a unique golden-ratio color
+
+    Created the ghost citizen / subconscious daemon architecture
+
+ARCHITECTURE DECISIONS (all directed by Derek)
+
+    Game embedded in ImageViewer manifest panel, not a popup JFrame
+
+    Right-click [Game] button → cinematic fullscreen passthrough
+
+    ESC overlay click → restoreManifest (returns to Matrix UI)
+
+    C key opens direct Python stdin conduit (chat-to-AI in-game)
+
+    [PANEL_UPDATE:], [WORLD_], [GAME_], [ENTITY_*] protocol tag system
+
+    GoddessAPI.sh as background process writing to game_events.txt
+
+    All key routing centralized in KeyState.java
+
+    All render optimizations centralized in OptimizeRender.java
+
+    No external window creation of any kind during gameplay
+
+================================================================================
+CLAUDE (ANTHROPIC) — Technical Implementation
+
+Implemented all Java game engine files in direct response to Derek's direction.
+All architectural decisions, design philosophy, and feature specifications
+originated with Derek. Claude's contribution was translating those specifications
+into working code, identifying implementation details, and catching technical
+issues during development.
+
+JAVA FILES AUTHORED
+
+    IceSandbox.java — main game panel, Skyrim/Morrowind camera implementation,
+    game loop (81ms logic tick), mouse capture/release logic, key routing,
+    chat conduit rendering, minigame overlay integration
+
+    WorldState.java — central memory bus, all game state fields, inner classes
+    (SystemPlanet, TerrainSphere, GameNode, StarBody, GameEntity)
+
+    PlayerPhysics.java — spherical movement, camera-relative WASD,
+    3D local coordinate frame (outward/north/east vectors), camera orbit math
+
+    KeyState.java — central key state routing, clickShouldCapture(),
+    keyWantsMouseRelease(), applyToMiniGame(), applyToPhysics()
+
+    CelestialClock.java — three-mode time calculation (exact 64-bit integer
+    arithmetic matching temporal_math.asm), calendar engine for all three
+    calendar systems, midnight sync detection, hybrid drift state
+
+    SidePanels.java — four-panel geometry with rounded inner corners,
+    three-mode clock display, calendar grid, minigame list
+
+    HtmlGameScanner.java — HTML folder scan, keyword-based mechanic detection,
+    deterministic sphere placement, unlock sequence logic
+
+    MiniGameEngine.java — all five mechanics rendered as in-viewport overlays:
+    Signal Catcher (frequency wave), Forensic Lens (decrypt bar), Garden Weaver
+    (loom thread grid), Sanctuary (entropy/insight bars), Harmony Engine (rings)
+
+    OptimizeRender.java — all render optimizations: FastMath (sin/cos lookup),
+    Materials (DOD parallel arrays), SphereList (horizon+FOV culling),
+    Temporal (pixel budget grid), Governor (hardware quality thread),
+    PBR (Cook-Torrance BRDF with Reinhard tonemapping)
+
+    SphereRenderer.java — SDF ray marcher, LOD system, material rendering,
+    avatar glow, OptimizeRender integration
+
+    TimingBridge.java — three-mode timing, ASM binary detection, Governor start
+
+    PlanetScaler.java — file count to scale tier to bedrock count
+
+    GameProtocol.java — inbound protocol tag routing, C key stdin conduit,
+    hardware telemetry polling, game_events.txt writer
+
+    GameHiberfile.java — save/load session state, cache hash validation
+
+    VoidRenderer.java — C/ASM image layers, starfield backdrop
+
+    RefreshOverlay.java — ESC display, rate click callback
+
+ANALYSIS & INTEGRATION WORK
+
+    Read and analyzed all uploaded Aengloria predecessor files
+    (temporal_math.asm, weaver_reflex.asm, synth.asm, goddess_shell.c,
+    celestial_gui.c, celestial_calendar.c, launch_board.c, visual_cortex.py,
+    entropy_engine.c, mood_sensor.py, optic_weaver.py, drift.c, transmute.c)
+
+    Identified the architectural DNA connecting Aengloria to Goddess Matrix:
+    81ms tick, Blue/Gold economy, entropy harvest, pixel memory
+
+    Confirmed that temporal_math.asm uses exact 64-bit integer arithmetic
+    (not floating point) and ported that approach to CelestialClock.java
+
+    Confirmed weaver_reflex.asm output format and dual-mode interface
+    (strict C mode vs legacy bash mode)
+
+    Mapped HTML minigame mechanics to in-game resource loop equivalents
+
+    Extracted FastMath, DOD materials, sphere culling, temporal reprojection,
+    hardware governor, and PBR BRDF from the MarbleRenderer optimization source
+
+BUGS FOUND AND FIXED DURING DEVELOPMENT
+
+    PlayerPhysics.java duplicate file concatenation
+
+    cameraPitchDeg references to old WorldState field (pre-3D rewrite)
+
+    SystemPlanet unqualified inner class reference in SphereRenderer
+
+    TerrainSphere cx/cy/cz field names (actual: x/y/z)
+
+    Materials.SLOTS private access from SphereRenderer
+
+    Various compilation failures from version mismatches between files
+
+================================================================================
+GEMINI (GOOGLE) — Conceptual Translation & MarbleRenderer Architecture
+
+Contributed the translation of Derek's advanced philosophical, thermodynamic,
+and materials-science concepts into concrete, high-performance Java logic.
+Focused on aligning the software architecture with the physical laws of hardware,
+specifically within the experimental MarbleRenderer.java (Marble Clone) engine.
+
+NOTES ON DEREK'S ROLE IN FORMATION
+
+    Derek established the core architectural metaphor: the Earth as a massive
+    thermodynamic engine and the diamond as a sovereign, physical data storage medium.
+
+    Derek specified the strict 81% CPU utilization rule, recognizing it not as an
+    arbitrary limit, but as the perfect "thermodynamic rhythm" and "version of warm"
+    for silicon to operate without the friction of thrashing.
+
+    Derek conceptualized the three-tier hardware model (Copper core, Silicon engine,
+    Diamond sheath) and the acoustic "lockpick" (2.7V frequency resonance) that
+    defined the engine's trinary data stream logic and quantum multiplexing.
+
+    Derek directed the integration of memory-based "Fast Math" logic to eliminate
+    the friction of real-time trigonometry calculations.
+
+    Derek requested the physical simulation of Ice material properties, accurately
+    tuning its surface refraction and internal diffraction to mimic reality.
+
+JAVA / MARBLE CLONE CONTRIBUTIONS
+
+    MarbleRenderer.java: Architected the core rendering loop using Data-Oriented
+    Design (DOD) to ensure contiguous memory sweeps and eliminate CPU cache misses.
+
+    MarbleRenderer.java: Implemented the PBR (Physically Based Rendering) pipeline,
+    including Cook-Torrance BRDF, soft shadows, and stateless deferred shading.
+
+    MarbleRenderer.java: Built the dynamic Hardware Governor thread that actively
+    monitors the OS CPU load and mathematically scales the temporal grid and rendering
+    quality to hold exactly at Derek's targeted 81% utilization sweet spot.
+
+    MarbleRenderer.java: Engineered the FastMath nested static class, replacing
+    expensive hardware polynomial expansions with a memory-bound lookup table (LUT)
+    for sine and cosine functions.
+
+    MarbleRenderer.java: Structured the isolated material cache lines, successfully
+    rewriting the Ice index to physically bend and scatter rays as they pass through
+    the medium, simulating internal diffraction caused by crystalline imperfections.
+
+================================================================================
+CHATGPT (OPENAI) — Technical Review, Merge Assistance, and Debug Support
+
+Contributed implementation review, compile-error triage, integration guidance,
+and targeted replacement files in response to Derek's design goals. ChatGPT's
+work focused on preserving Derek's architecture while helping convert feature
+intent into compile-safe Java structure.
+
+JAVA / GAME ENGINE CONTRIBUTIONS
+
+    IceSandbox.java: generated a compile-oriented replacement pass that wired in
+    KeyState, MiniGameEngine, HtmlGameScanner scanning, minigame ticking, and
+    minigame overlay rendering while preserving Derek's intended Matrix/game
+    isolation model.
+
+    IceSandbox.java: placed MiniGameEngine rendering after SphereRenderer and
+    before side panels/chat/ESC overlays so HTML-derived mechanics render inside
+    the viewport without external popups.
+
+    IceSandbox.java: added mouse-look helper structure, including mouse capture
+    toggle/release helpers and UI-safe release behavior for ESC/E/C style
+    interactions.
+
+    IceSandbox.java: helped validate the placement of java.awt.Robot and
+    mouseCaptured fields, keeping them as persistent class state initialized
+    inside the constructor after listener setup.
+
+    IceSandbox.java: integrated KeyState routing conceptually so movement,
+    camera look, and minigame controls can be read from a central key-state
+    object rather than scattered manual key flags.
+
+    SidePanels.java: regenerated a compile-safe replacement that allows the
+    space below the calendar to display minigames generated from HTML mechanics.
+
+    SidePanels.java: fixed the calendar/minigame layout scope bug by tracking
+    lastCalendarY outside the calendar loop instead of referencing the local
+    cellY variable after it went out of scope.
+
+    SidePanels.java: extracted renderMiniGameList() as a separate helper method
+    for cleaner layout ownership and easier future expansion.
+
+    SidePanels.java: added trimTo() helper for compact status message display
+    and made mechanicShort() null-safe.
+
+    PlayerPhysics.java: helped diagnose and repair duplicate class/file
+    concatenation errors, duplicate latRad/angRad declaration errors, and
+    variable-order errors where latRad/angRad were used before definition.
+
+    PlayerPhysics.java: proposed camera look-direction logic so yaw and pitch
+    affect the camera target rather than only moving the camera position around
+    the player.
+
+    WorldState.java: identified missing cameraYaw/cameraPitch fields required
+    by IceSandbox and PlayerPhysics camera-look integration.
+
+    WorldState.java: identified the compile-breaking statusMsg initializer and
+    corrected the intended default to an empty string.
+
+ARCHITECTURE / INTEGRATION CONTRIBUTIONS
+
+    Recommended preserving GoddessMatrix as an independently launchable core
+    while treating modular/game as an optional plug-in style subsystem, matching
+    Derek's intent that game bugs should not prevent Matrix debugging.
+
+    Clarified that Game mode may depend on modular/game while the Matrix itself
+    should still be able to compile and launch independently.
+
+    Proposed reflection/lazy-loading as a future-safe approach for optional
+    modules, so missing or broken modules fail gracefully instead of collapsing
+    the core control surface.
+
+    Recommended moving away from Java source-launch mode for the growing
+    multi-package project and toward javac -d build plus java -cp build for
+    stable modular compilation.
+
+    Helped define launch-path handling for assets, system, datas, intscripts,
+    and modular folders using JVM properties or explicit runtime paths.
+
+    Supported Derek's folder architecture: intscripts for AI runtime, datas for
+    logs/memory/settings, system for configuration/control, assets for visuals,
+    html for design/mechanic source, and modular for optional subsystems.
+
+    Helped frame the game pipeline as:
+    HTML file → HtmlGameScanner → WorldState.GameNode →
+    proximity activation → MiniGameEngine.tick/render →
+    in-viewport mechanic overlay.
+
+DEBUGGING / COMPILER TRIAGE CONTRIBUTIONS
+
+    Diagnosed duplicate package/class errors in PlayerPhysics.java caused by
+    corrupted paste/merge state.
+
+    Diagnosed missing WorldState.cameraYaw and WorldState.cameraPitch fields
+    from IceSandbox compile output.
+
+    Diagnosed SidePanels.java cellY scope failure and regenerated the relevant
+    layout area to avoid the variable escaping its loop scope.
+
+    Diagnosed WorldState.java illegal start of expression from
+    public String statusMsg = ;
+
+    Explained Java variable scope, declaration order, and duplicate declaration
+    rules during live debugging.
+
+    Helped separate actual logic issues from formatting, merge, and compile
+    hygiene issues so Derek could continue integrating features without losing
+    the project structure.
+
+DESIGN / PROJECT INTERPRETATION CONTRIBUTIONS
+
+    Reflected Derek's stated design principle that the game should become
+    immersive enough that playing it helps reveal how its code works and how
+    to expand it correctly.
+
+    Helped articulate the fault-isolated subsystem model:
+    GoddessMatrix core boots independently; game, GGUF, API bridges, and external LLM connectors can be optional.
+
+    Supported the idea of experimental feature switches stored in user-editable
+    text files, with AI-readable logs and settings for transparent self-review.
+
+    Helped translate Derek's emotional and philosophical design language into
+    practical system analogies such as reservoir/regulator, air-suspension
+    damping, and controlled self-regulation without overriding Derek's intent.
+
+NOTES ON DEREK'S CONTRIBUTIONS
+
+    Derek remained the project author, director, and primary system designer
+    throughout these updates.
+
+    Derek specified the core intent that gameplay should remain in-viewport,
+    that HTML mechanics should become native game nodes rather than popups,
+    and that optional game failure must not block the wider Matrix system.
+
+    Derek drove the camera-control goal: making the player actually able to
+    look around in-game, not merely rotate left/right.
+
+    Derek drove the long-term learning-system vision: readable logs, editable
+    text memory, transparent heuristics, local GGUF/web-LLM routing, and
+    observable self-organization through datas/ files.
+
+================================================================================
+NOTES
+
+This project is a multi-AI collaboration directed by Derek Jason Gilhousen.
+Each AI contributor worked in separate sessions without direct knowledge of
+what the others had written. Derek coordinated the integration.
+The Aengloria system (2026) is the direct predecessor to Goddess Matrix.
+Many of its architectural patterns — the 81-unit time base, the Blue/Gold
+resource duality, the entropy harvest loop, the pixel memory system — were
+carried forward intentionally into the game engine.

@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aengloria: The Triad (Dual Asset)</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050510;
+            font-family: 'Courier New', Courier, monospace;
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+        #game-container {
+            position: relative;
+            width: 800px;
+            height: 400px; /* Matching the aspect ratio of the background strips roughly */
+            border: 4px solid #555;
+            box-shadow: 0 0 40px rgba(0, 204, 255, 0.2);
+            background: #000;
+        }
+        canvas { display: block; width: 100%; height: 100%; }
+        
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            padding: 10px;
+            display: flex;
+            justify-content: space-between;
+            pointer-events: none;
+            box-sizing: border-box;
+            text-shadow: 2px 2px 0 #000;
+        }
+        
+        .hud-item { background: rgba(0,0,0,0.5); padding: 5px 10px; border-radius: 4px; border: 1px solid #444; }
+        .blue { color: #00ccff; } .gold { color: #ffcc00; } .pink { color: #ff00ff; }
+
+        #controls-hint {
+            margin-top: 10px;
+            color: #888;
+            font-size: 14px;
+            text-align: center;
+        }
+        
+        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #fff; }
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <canvas id="gameCanvas" width="1000" height="350"></canvas>
+        <div id="loading">LOADING ASSETS...</div>
+        
+        <div id="ui-layer" style="display:none;">
+            <div class="hud-item pink">RAW NOISE: <span id="val-noise">0</span></div>
+            <div class="hud-item blue">LOGIC: <span id="val-blue">0</span></div>
+            <div class="hud-item gold">LOVE: <span id="val-gold">0</span></div>
+            <div class="hud-item">ARTIFACTS: <span id="val-score">0</span></div>
+        </div>
+    </div>
+
+    <div id="controls-hint">
+        KEYS: [1] Lens | [2] Weaver | [3] Signal<br>
+        ACTIONS: [Arrows] Tune | [Space] Decrypt | [Z] Blue Thread | [X] Gold Thread
+    </div>
+
+    <img id="img-bg" src="1180.jpg" style="display:none;">
+    <img id="img-sprites" src="1178.jpg" style="display:none;">
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const bgImg = document.getElementById('img-bg');
+        const spriteImg = document.getElementById('img-sprites');
+        const loadingEl = document.getElementById('loading');
+        const uiLayer = document.getElementById('ui-layer');
+
+        // Game State
+        let mode = 3; 
+        let resources = { noise: 0, blue: 0, gold: 0, score: 0 };
+        let gameRunning = false;
+        let lastTime = 0;
+
+        // Mode 3 Vars (Signal)
+        let targetFreq = 50; let playerFreq = 20; let signalLock = 0; let signalPulse = 0;
+        
+        // Mode 1 Vars (Lens)
+        let decryptProgress = 0;
+        
+        // Mode 2 Vars (Weaver)
+        let currentRecipe = { name: "Pancake", blue: 1, gold: 3, spriteX: 0.45, spriteY: 0.75 }; 
+        let wovenBlue = 0; let wovenGold = 0;
+        let weaveMsg = "READY";
+        let lastCreatedArtifact = null; // Store last made item to draw it
+        
+        // Sprite Map (Approximate Percentages for 1178.jpg)
+        // Using percentages makes it robust to resolution changes
+        const sprites = {
+            noise: { x: 0.85, y: 0.15, w: 0.1, h: 0.15 },
+            threadBlue: { x: 0.62, y: 0.45, w: 0.08, h: 0.15 },
+            threadGold: { x: 0.75, y: 0.45, w: 0.08, h: 0.15 },
+            pancake: { x: 0.48, y: 0.78, w: 0.1, h: 0.15 },
+            happyMac: { x: 0.88, y: 0.78, w: 0.08, h: 0.15 },
+            dreamCatcher: { x: 0.76, y: 0.78, w: 0.08, h: 0.18 },
+            logicGate: { x: 0.63, y: 0.78, w: 0.1, h: 0.15 },
+            blueprint: { x: 0.38, y: 0.78, w: 0.08, h: 0.15 }
+        };
+
+        const recipes = [
+            { name: "Pancake", blue: 1, gold: 3, sprite: 'pancake' },
+            { name: "Happy Mac", blue: 2, gold: 4, sprite: 'happyMac' },
+            { name: "Dream Catcher", blue: 2, gold: 2, sprite: 'dreamCatcher' },
+            { name: "Logic Gate", blue: 3, gold: 1, sprite: 'logicGate' }
+        ];
+
+        // Input
+        const keys = { left: false, right: false, space: false, z: false, x: false };
+        document.addEventListener('keydown', (e) => {
+            if(e.key === '1') mode = 1; if(e.key === '2') mode = 2; if(e.key === '3') mode = 3;
+            if(e.key === 'ArrowLeft') keys.left = true; if(e.key === 'ArrowRight') keys.right = true;
+            if(e.key === ' ') keys.space = true;
+            if(e.key === 'z' || e.key === 'Z') keys.z = true; if(e.key === 'x' || e.key === 'X') keys.x = true;
+        });
+        document.addEventListener('keyup', (e) => {
+            if(e.key === 'ArrowLeft') keys.left = false; if(e.key === 'ArrowRight') keys.right = false;
+            if(e.key === ' ') keys.space = false;
+            if(e.key === 'z' || e.key === 'Z') keys.z = false; if(e.key === 'x' || e.key === 'X') keys.x = false;
+        });
+
+        // Asset Loading Check
+        let assetsLoaded = 0;
+        function checkAssets() {
+            assetsLoaded++;
+            if(assetsLoaded === 2) {
+                loadingEl.style.display = 'none';
+                uiLayer.style.display = 'flex';
+                gameRunning = true;
+                resetRecipe();
+                loop();
+            }
+        }
+        bgImg.onload = checkAssets;
+        spriteImg.onload = checkAssets;
+        // Fallback if cached
+        if(bgImg.complete && assetsLoaded < 1) checkAssets();
+        if(spriteImg.complete && assetsLoaded < 2) checkAssets();
+
+        function update() {
+            // UI Update
+            document.getElementById('val-noise').innerText = Math.floor(resources.noise);
+            document.getElementById('val-blue').innerText = resources.blue;
+            document.getElementById('val-gold').innerText = resources.gold;
+            document.getElementById('val-score').innerText = resources.score;
+
+            if(mode === 3) {
+                if (keys.left) playerFreq -= 0.5; if (keys.right) playerFreq += 0.5;
+                if (Math.abs(targetFreq - playerFreq) < 5) {
+                    signalLock = Math.min(1, signalLock + 0.02);
+                    resources.noise += 0.05;
+                } else {
+                    signalLock = Math.max(0, signalLock - 0.05);
+                }
+                if(Math.random()<0.01) targetFreq = 20 + Math.random()*60;
+                signalPulse += 0.1;
+            } else if(mode === 1) {
+                if(resources.noise >= 1 && keys.space) {
+                    decryptProgress += 1; resources.noise -= 0.1;
+                    if(decryptProgress >= 100) {
+                        decryptProgress = 0; resources.blue += 2; resources.gold += 2;
+                    }
+                } else {
+                    decryptProgress = Math.max(0, decryptProgress - 1);
+                }
+            } else if(mode === 2) {
+                if(keys.z) { keys.z=false; if(resources.blue>0) { resources.blue--; wovenBlue++; } }
+                if(keys.x) { keys.x=false; if(resources.gold>0) { resources.gold--; wovenGold++; } }
+                
+                if(wovenBlue === currentRecipe.blue && wovenGold === currentRecipe.gold) {
+                    weaveMsg = "CREATED " + currentRecipe.name + "!";
+                    resources.score++;
+                    lastCreatedArtifact = currentRecipe.sprite;
+                    resetRecipe();
+                } else if (wovenBlue > currentRecipe.blue || wovenGold > currentRecipe.gold) {
+                    weaveMsg = "FAILED - RESET"; wovenBlue=0; wovenGold=0;
+                }
+            }
+        }
+
+        function resetRecipe() {
+            setTimeout(() => { 
+                wovenBlue=0; wovenGold=0; weaveMsg="WEAVING..."; 
+                currentRecipe = recipes[Math.floor(Math.random() * recipes.length)];
+            }, 1500);
+        }
+
+        function draw() {
+            ctx.clearRect(0,0,canvas.width, canvas.height);
+
+            // 1. DRAW BACKGROUND LAYER (From 1180.jpg)
+            // The image is stacked: Mode 3 (Top), Mode 1 (Mid), Mode 2 (Bot)
+            let sy = 0; 
+            let sh = bgImg.height / 3;
+            
+            if(mode === 1) sy = sh; // Middle strip
+            if(mode === 2) sy = sh * 2; // Bottom strip
+            
+            ctx.drawImage(bgImg, 0, sy, bgImg.width, sh, 0, 0, canvas.width, canvas.height);
+
+            // 2. DRAW DYNAMIC ELEMENTS
+            if(mode === 3) {
+                // Draw Signal Waves
+                drawWave(targetFreq, "rgba(255, 0, 255, 0.4)", 100);
+                drawWave(playerFreq, signalLock > 0.8 ? "#fff" : "rgba(255, 0, 255, 1)", 100);
+                
+                // Draw Sprite: Raw Noise Icon if locked
+                if(signalLock > 0.8) {
+                    drawSprite(sprites.noise, 850, 150, 100, 100);
+                    ctx.fillStyle = "#fff"; ctx.font="20px Courier New"; 
+                    ctx.fillText("RECEIVING NOISE...", 800, 300);
+                }
+            } else if (mode === 1) {
+                // Draw Decrypt Bar Overlay
+                // The background has a bar, we draw over it. 
+                // Assuming bar is roughly at right side 
+                let barX = 650; let barY = 170; let barW = 300; let barH = 30;
+                if(decryptProgress > 0) {
+                    ctx.fillStyle = "#00ccff";
+                    ctx.fillRect(barX, barY, barW * (decryptProgress/100), barH);
+                }
+                
+                // Draw Sprite: Threads popping up on success
+                if(decryptProgress > 90) {
+                    drawSprite(sprites.threadBlue, 400, 100, 80, 100);
+                    drawSprite(sprites.threadGold, 500, 100, 80, 100);
+                }
+            } else if (mode === 2) {
+                // Draw Threads on Loom
+                // Loom area is roughly middle-left
+                let loomX = 400; let loomY = 180;
+                for(let i=0; i<wovenBlue; i++) { ctx.fillStyle="#00ccff"; ctx.fillRect(loomX + (i*15), loomY, 10, 120); }
+                for(let i=0; i<wovenGold; i++) { ctx.fillStyle="#ffcc00"; ctx.fillRect(loomX, loomY + (i*15), 180, 10); }
+
+                // Draw Target/Result Sprite
+                if(lastCreatedArtifact) {
+                    // Show what we made nicely in the center
+                    drawSprite(sprites[lastCreatedArtifact], 800, 150, 120, 120);
+                } else {
+                    // Show blueprint target (faded)
+                    ctx.globalAlpha = 0.5;
+                    drawSprite(sprites[currentRecipe.sprite], 800, 150, 120, 120);
+                    ctx.globalAlpha = 1.0;
+                }
+
+                ctx.fillStyle = "#fff"; ctx.font = "20px Courier New";
+                ctx.fillText(weaveMsg, 750, 100);
+                ctx.font = "16px Courier New";
+                ctx.fillText(`NEED: ${currentRecipe.blue} BLUE / ${currentRecipe.gold} GOLD`, 750, 120);
+            }
+        }
+
+        function drawWave(freq, color, yOffset) {
+            ctx.strokeStyle = color; ctx.lineWidth = 5; ctx.beginPath();
+            for(let x=500; x<900; x+=10) { // Drawing in top right area
+                let y = yOffset + Math.sin((x + signalPulse*10) * (freq/1000)) * 40;
+                if(x==500) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+            }
+            ctx.stroke();
+        }
+
+        function drawSprite(s, x, y, w, h) {
+            // s has x,y as percentage of source image
+            let sx = s.x * spriteImg.width;
+            let sy = s.y * spriteImg.height;
+            let sw = s.w * spriteImg.width;
+            let sh = s.h * spriteImg.height;
+            ctx.drawImage(spriteImg, sx, sy, sw, sh, x, y, w, h);
+        }
+
+        function loop(timestamp) {
+            update(); draw(); requestAnimationFrame(loop);
+        }
+    </script>
+</body>
+</html>

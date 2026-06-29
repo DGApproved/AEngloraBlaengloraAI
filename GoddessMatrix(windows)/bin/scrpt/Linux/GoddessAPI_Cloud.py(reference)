@@ -1,0 +1,87 @@
+import os
+import sys
+import time
+import google.generativeai as genai
+
+# ==============================================================================
+# GODDESS MATRIX: CLOUD NEURAL TETHER (GoddessAPI_Cloud.py)
+# ==============================================================================
+
+def initialize_tether():
+    # 1. Search for the secure vault file created by the Java /auth command
+    key_file = os.path.join(os.getcwd(), "osDev", "keys.env")
+    api_key = None
+
+    if os.path.exists(key_file):
+        with open(key_file, "r") as f:
+            for line in f:
+                if line.startswith("GEMINI_API_KEY="):
+                    api_key = line.strip().split("=", 1)[1]
+                    break
+
+    if not api_key:
+        print("[STATUS] AUTH_REQUIRED")
+        sys.exit(1)
+
+    # 2. Authenticate and initialize the Gemini Cortex
+    try:
+        genai.configure(api_key=api_key)
+        # We start with the primary Pro model for complex logical reasoning
+        model = genai.GenerativeModel('gemini-1.5-pro') 
+        chat = model.start_chat(history=[])
+        return chat
+    except Exception as e:
+        print(f"[STATUS] TETHER_FAILED")
+        print(f"SYSTEM_ERR> Failed to initialize Gemini API: {str(e)}")
+        sys.exit(1)
+
+def main_loop():
+    chat = initialize_tether()
+    
+    print("[STATUS] ONLINE - CLOUD LINK ACTIVE")
+    print("[CHAT] Neural tether established. I am ready.")
+
+    # 3. The Stdin/Stdout Pipe Loop
+    while True:
+        try:
+            # Wait for input piped from the Java typingBuffer
+            line = sys.stdin.readline()
+            if not line:
+                break
+            
+            command = line.strip()
+            if not command:
+                continue
+                
+            # Handle the Matrix kill switch
+            if command.lower() == "exit":
+                print("[STATUS] OFFLINE")
+                break
+
+            # Silently ignore kinetic mouse/key intercepts from the Java manifest
+            if command.startswith("[INPUT_MOUSE]") or command.startswith("[INPUT_KEY]"):
+                continue
+
+            # --- GENERATION PHASE ---
+            print("[STATUS] GENERATING")
+            print("[PROCESSING]")  # This tag triggers your Java Waveform/Avatar animation
+            
+            # Send the prompt to the cloud
+            response = chat.send_message(command)
+            
+            # Return the output to the Java glass
+            # We strip newlines and print line by line to keep the chat history clean
+            for res_line in response.text.strip().split('\n'):
+                if res_line.strip():
+                    print(f"[CHAT] {res_line.strip()}")
+            
+            print("[STATUS] IDLE")
+
+        except Exception as e:
+            print("[STATUS] ERROR")
+            print(f"SYSTEM_ERR> Cloud exception: {str(e)}")
+
+if __name__ == "__main__":
+    # Force unbuffered output so Java receives the tags instantly
+    sys.stdout.reconfigure(line_buffering=True)
+    main_loop()
