@@ -8,7 +8,7 @@ package system;
  * Responsibilities:
  * - HTML-based chat display (JEditorPane)
  * - inline raw data expansion via Hyperlinks and DOM manipulation
- * - typing buffer (JTextField)
+ * - typing buffer (JTextField/JTextPane)
  * - session log read/write
  * - cloud-mode (non-persistent) handling
  * - manifest image tracking
@@ -128,7 +128,7 @@ public class ChatHistory
         state.typingBuffer = typingBuffer;
         state.chatHistory = this;
     }
-    
+      
     /**
      * Safely transitions the rich text view to display the contents of a specific log file.
      * The original file data remains safely stored on the disk.

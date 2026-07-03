@@ -24,3 +24,53 @@ SYSTEM> REFRESH_RATE_SYNCED: Auto (Actual: 144Hz)
 USER> Test
 SYSTEM> REFRESH_RATE_SYNCED: Auto (Actual: 144Hz)
 USER> hmm
+SYSTEM> REFRESH_RATE_SYNCED: Auto (Actual: 144Hz)
+ERROR> MODULE_CRASH: Boot Failure: modular.Terminal
+ERROR> MODULE_CRASH: Boot Failure: modular.Terminal
+java.lang.ClassNotFoundException: modular.Terminal
+	at java.base/jdk.internal.loader.BuiltinClassLoader.loadClass(BuiltinClassLoader.java:580)
+	at java.base/java.lang.ClassLoader.loadClass(ClassLoader.java:490)
+	at java.base/java.lang.Class.forName0(Native Method)
+	at java.base/java.lang.Class.forName(Class.java:467)
+	at java.base/java.lang.Class.forName(Class.java:458)
+	at system.Keyboard.launchOptionalModule(Keyboard.java:646)
+	at system.Keyboard.handleExtensionButton(Keyboard.java:613)
+	at system.Keyboard.handleMatrixEvent(Keyboard.java:484)
+	at system.Keyboard.lambda$0(Keyboard.java:291)
+	at java.desktop/javax.swing.AbstractButton.fireActionPerformed(AbstractButton.java:1972)
+	at java.desktop/javax.swing.AbstractButton$Handler.actionPerformed(AbstractButton.java:2314)
+	at java.desktop/javax.swing.DefaultButtonModel.fireActionPerformed(DefaultButtonModel.java:407)
+	at java.desktop/javax.swing.DefaultButtonModel.setPressed(DefaultButtonModel.java:262)
+	at java.desktop/javax.swing.plaf.basic.BasicButtonListener.mouseReleased(BasicButtonListener.java:279)
+	at java.desktop/java.awt.Component.processMouseEvent(Component.java:6576)
+	at java.desktop/javax.swing.JComponent.processMouseEvent(JComponent.java:3404)
+	at java.desktop/java.awt.Component.processEvent(Component.java:6341)
+	at java.desktop/java.awt.Container.processEvent(Container.java:2260)
+	at java.desktop/java.awt.Component.dispatchEventImpl(Component.java:4958)
+	at java.desktop/java.awt.Container.dispatchEventImpl(Container.java:2318)
+	at java.desktop/java.awt.Component.dispatchEvent(Component.java:4790)
+	at java.desktop/java.awt.LightweightDispatcher.retargetMouseEvent(Container.java:4917)
+	at java.desktop/java.awt.LightweightDispatcher.processMouseEvent(Container.java:4560)
+	at java.desktop/java.awt.LightweightDispatcher.dispatchEvent(Container.java:4501)
+	at java.desktop/java.awt.Container.dispatchEventImpl(Container.java:2304)
+	at java.desktop/java.awt.Window.dispatchEventImpl(Window.java:2671)
+	at java.desktop/java.awt.Component.dispatchEvent(Component.java:4790)
+	at java.desktop/java.awt.EventQueue.dispatchEventImpl(EventQueue.java:725)
+	at java.desktop/java.awt.EventQueue.dispatchEvent(EventQueue.java:702)
+	at java.desktop/java.awt.EventDispatchThread.pumpOneEventForFilters(EventDispatchThread.java:203)
+	at java.desktop/java.awt.EventDispatchThread.pumpEventsForFilter(EventDispatchThread.java:124)
+	at java.desktop/java.awt.EventDispatchThread.pumpEventsForHierarchy(EventDispatchThread.java:113)
+	at java.desktop/java.awt.EventDispatchThread.pumpEvents(EventDispatchThread.java:109)
+	at java.desktop/java.awt.EventDispatchThread.pumpEvents(EventDispatchThread.java:101)
+	at java.desktop/java.awt.EventDispatchThread.run(EventDispatchThread.java:90)
+
+SYSTEM> REFRESH_RATE_SYNCED: Auto (Actual: 144Hz)
+SYSTEM> INITIALIZING GODDESS_API HOOK FOR FN1
+API_STDOUT> 'C:\Users\DGApproved\AEngloraBlaengloraAI\GoddessMatrix' is not recognized as an internal or external command,
+API_STDOUT> operable program or batch file.
+SYSTEM> INITIALIZING GODDESS_API HOOK FOR FN1
+API_STDOUT>   File "C:\Users\DGApproved\AEngloraBlaengloraAI\GoddessMatrix(windows)\scrpt\Windows\GoddessAPI.py", line 2
+API_STDOUT> SyntaxError: Non-ASCII character '\xe2' in file C:\Users\DGApproved\AEngloraBlaengloraAI\GoddessMatrix(windows)\scrpt\Windows\GoddessAPI.py on line 3, but no encoding declared; see http://python.org/dev/peps/pep-0263/ for details
+SYSTEM> INITIALIZING GODDESS_API HOOK FOR FN1
+API_STDOUT> 'C:\Users\DGApproved\AEngloraBlaengloraAI\GoddessMatrix' is not recognized as an internal or external command,
+API_STDOUT> operable program or batch file.

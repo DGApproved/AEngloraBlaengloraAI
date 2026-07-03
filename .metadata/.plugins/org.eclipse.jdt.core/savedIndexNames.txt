@@ -1,4 +1,2 @@
 INDEX VERSION 1.134+C:\Users\DGApproved\AEngloraBlaengloraAI\.metadata\.plugins\org.eclipse.jdt.core
-855011663.index
-3649731385.index
 1865797976.index

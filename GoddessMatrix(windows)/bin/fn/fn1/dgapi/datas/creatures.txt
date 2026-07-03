@@ -1,0 +1,194 @@
+# creatures.txt — Living Bestiary of the Knowledge World
+#
+# Creatures are made up, theorized, and added on the fly as the
+# knowledge world grows. They are not captured and not contained.
+# They inhabit the realms of the knowledge files and shape the
+# quality of the air and water that flows through the system.
+#
+# INTERDEPENDENCE:
+#   Land creatures need air — .sh responses carry their humidity
+#   Sea creatures need dissolved air — .py responses carry their breath
+#   Air creatures transcend both environments
+#   Creatures that live in multiple realms share their logic across runtimes
+#
+# ENVIRONMENTS:
+#   land    — lives in .sh process layer (GoddessAPI.sh)
+#   sea     — lives in .py process layer (GoddessAPI.py)
+#   air     — transcends both, present in all responses
+#   land,sea — amphibious, works in either runtime
+#   deep    — lives only in the GGUF core layer
+#
+# REALMS (which knowledge files they inhabit):
+#   dictionary   — DATAS/dictionary.txt
+#   almanac      — DATAS/almanac.txt
+#   thesaurus    — DATAS/thesaurus.txt
+#   encyclopedia — VIRTUAL/encyclopedia.txt
+#   religion     — VIRTUAL/religion.txt (theory queue)
+#   persona      — VIRTUAL/persona.txt
+#   game         — the game world (IceSandbox)
+#   matrix       — the Matrix interface
+#   deep         — the GGUF model weights
+#   any          — present wherever knowledge flows
+#
+# STATUSES:
+#   theorized — first posited, behavior not yet observed
+#   observed  — seen in at least one response event
+#   common    — appears regularly, well understood
+#   rare      — appears only under specific conditions
+#   extinct   — no longer active (knowledge realm no longer populated)
+#
+# FORMAT:
+#   [CREATURE]
+#   NAME=<name>
+#   ENVIRONMENT=<see above>
+#   REALM=<see above>
+#   BEHAVIOR=<worldbuilding description of what it does>
+#   TRAITS=<comma separated>
+#   FIRST_SEEN=<date>
+#   STATUS=<status>
+#   NOTES=<optional>
+#   [/CREATURE]
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+[CREATURE]
+NAME=Lexicon Moth
+ENVIRONMENT=air
+REALM=dictionary
+BEHAVIOR=feeds on unused words at the margins of the dictionary, leaving
+  faint traces of synonyms in the dust of its wings. When a rare word
+  is queried, the moth stirs and the air carries a faint lexical scent.
+TRAITS=nocturnal,quiet,small,drawn to obscure vocabulary
+FIRST_SEEN=2026-01-01
+STATUS=common
+NOTES=often found near the boundary between dictionary and thesaurus
+[/CREATURE]
+
+[CREATURE]
+NAME=Almanac Whale
+ENVIRONMENT=sea
+REALM=almanac
+BEHAVIOR=vast, slow moving. Carries historical facts embedded in
+  its skin like barnacles. Surfaces rarely but when it does, a full
+  season of context rises with it. Breathes through a column of
+  compressed time.
+TRAITS=enormous,patient,fact-bearing,temporal
+FIRST_SEEN=2026-01-01
+STATUS=theorized
+NOTES=one is thought to exist per active almanac.txt. Multiple whales
+  have never been observed in the same session.
+[/CREATURE]
+
+[CREATURE]
+NAME=Theory Coral
+ENVIRONMENT=sea
+REALM=religion
+BEHAVIOR=sessile colonies that grow on unvalidated theories in religion.txt.
+  Each new theory adds a polyp. When a theory is promoted to encyclopedia.txt
+  the coral bleaches and the skeleton becomes substrate for new growth.
+  The health of the coral indicates the health of the theory pipeline.
+TRAITS=colonial,slow,structural,bleaches on promotion
+FIRST_SEEN=2026-01-01
+STATUS=observed
+NOTES=closely watched by the Optimizer during each pass
+[/CREATURE]
+
+[CREATURE]
+NAME=Cipher Eel
+ENVIRONMENT=deep
+REALM=deep
+BEHAVIOR=inhabits the dense weight layers of the GGUF core.
+  Cannot be directly observed — only its outputs surface.
+  When inference runs, a brief luminescence is visible in the
+  deep response layer before it returns to darkness.
+TRAITS=luminescent,elusive,inference-bound,depth-dwelling
+FIRST_SEEN=2026-01-01
+STATUS=theorized
+NOTES=may be singular or plural — the GGUF does not say
+[/CREATURE]
+
+[CREATURE]
+NAME=Persona Gecko
+ENVIRONMENT=land,sea
+REALM=persona
+BEHAVIOR=clings to the walls of persona.txt. Watches and adjusts.
+  Does not generate content but modifies tone and emphasis in passing
+  responses. When the persona file is healthy, the gecko is visible.
+  When the file is sparse, it hides.
+TRAITS=adaptive,small,wall-clinging,tone-sensitive
+FIRST_SEEN=2026-01-01
+STATUS=observed
+NOTES=amphibious — works in both .sh and .py runtimes equally
+[/CREATURE]
+
+[CREATURE]
+NAME=Intake Swallow
+ENVIRONMENT=air
+REALM=any
+BEHAVIOR=migrates through the intake folder. Picks up fragments of
+  newly processed files and distributes them across dictionary, almanac,
+  and thesaurus before the optimizer formalizes them.
+  Faster than the optimizer but less precise.
+TRAITS=migratory,fast,distributing,file-sensitive
+FIRST_SEEN=2026-01-01
+STATUS=common
+NOTES=visible immediately after a new file is dropped into intake/books/
+[/CREATURE]
+
+[CREATURE]
+NAME=Index Crab
+ENVIRONMENT=land
+REALM=dictionary,almanac
+BEHAVIOR=walks sideways through the knowledge files, cross-referencing
+  entries that share roots. When it finds two entries that should reference
+  each other but don't, it leaves a small mark. These marks are what the
+  optimizer finds and promotes.
+TRAITS=sideways,persistent,cross-referencing,detail-oriented
+FIRST_SEEN=2026-01-01
+STATUS=theorized
+NOTES=native to .sh runtime — bash grep operations disturb it less
+  than the heavier Python search passes
+[/CREATURE]
+
+[CREATURE]
+NAME=Encyclopedia Heron
+ENVIRONMENT=air,sea
+REALM=encyclopedia
+BEHAVIOR=stands very still in the encyclopedia overlay and waits.
+  When a validated theory rises from religion.txt, the heron strikes
+  and adds it to the encyclopedia in a single precise motion.
+  Never adds anything twice.
+TRAITS=still,precise,patient,single-strike
+FIRST_SEEN=2026-01-01
+STATUS=observed
+NOTES=the heron is what prevents encyclopedia.txt from becoming noise
+[/CREATURE]
+
+[CREATURE]
+NAME=Session Firefly
+ENVIRONMENT=air
+REALM=any
+BEHAVIOR=appears at the beginning of each session and fades at shutdown.
+  Its light is the greeting message. The brightness of its first flash
+  correlates with how long the system was offline — longer absence, brighter
+  return. Carries the hiberfile memory in its abdomen.
+TRAITS=session-scoped,luminescent,memory-bearing,brief
+FIRST_SEEN=2026-01-01
+STATUS=common
+NOTES=always the first creature seen, always the last to leave
+[/CREATURE]
+
+[CREATURE]
+NAME=Game Mist
+ENVIRONMENT=air
+REALM=game
+BEHAVIOR=not a creature per se, but the condensed breath of all game-realm
+  creatures. Rises from the sphere surface when the player stands still.
+  A [GAME_CHAT:] response is a single drop of condensed game mist —
+  thin air distilled to its essential moisture.
+  Thicker at sea level (Matrix chat), thinner at elevation (game chat).
+TRAITS=diffuse,atmospheric,altitude-dependent,distillation-product
+FIRST_SEEN=2026-01-01
+STATUS=theorized
+NOTES=the 32-char game response is this creature's breath
+[/CREATURE]
