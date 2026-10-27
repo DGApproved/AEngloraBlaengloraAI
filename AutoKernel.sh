@@ -89,6 +89,46 @@
 # the AutoKernel orchestration layer.  Subsystem-only implementation details
 # belong in the subsystem's own changelog.
 #
+# AutoKernel(30)-Claude
+#   [DRIVERS][MENU 22/23] Added three generated driver tools, written by
+#   autokernel_write_driver_tools() from bare `cat >` bodies into
+#   ${AUTOKERNEL_WORKSPACE}/DriverTools and regenerated on every use:
+#   kernel-headers-setup.sh (custom-kernel headers for DKMS; detects the
+#   compiler a kernel was built with and pins it, including GCC-plugin
+#   kernels), gpu-npu-drivers.sh (NVIDIA / AMD / Intel GPU and Intel / AMD NPU
+#   detection and install) and virtual-ai-drivers.sh (llama.cpp text, vLLM
+#   image input, Forge image output backends). Each tool is re-runnable and
+#   records what it installs in ~/.tmp (.kernelclog, .driverlog, .installlog)
+#   for its -u uninstall. Option 23 gained tiers 4-7 (each tool, then the full
+#   stack in order, uninstall in reverse); option 22 gained a read-only Tier 4
+#   status view. Tier 1 on both falls back for LMDE, which has no
+#   ubuntu-drivers. run_tool runs the tools as SUDO_USER when AutoKernel is
+#   started with sudo, because the tools refuse to run as root.
+#   [DRIVERS][AI-STACK LOCATION] run_tool passes STACK_DIR so the virtual AI
+#   stack (backends, models, caches) is placed in ai-stack/ beside AutoKernel.sh
+#   (the AutoKernel workspace) like AutoKernel's other folders, rather than the
+#   tool's standalone default ~/ai-stack. The tool records its location in its
+#   log, offers to move an existing ~/ai-stack install (rebuilding only the
+#   Python environments, which store absolute paths), and its -u removes files
+#   in the recorded stack folder even when that folder is outside $HOME.
+#   [DRIVERS][MENU 23/24] Option 23 now only installs (tiers 4-7); the matching
+#   uninstalls moved to option 24 as tiers 4-6 plus a full-stack uninstall that
+#   runs in reverse order (6 -> 5 -> 4). The I/U prompt (ask_mode) was removed.
+#   [MENU 31] Relabeled "Test & Run Options": a submenu with the existing OS
+#   Screensaver / Test plus Start Vision / Text / Image Model, implemented by
+#   autokernel_start_model(). It reads models from the installed stack's
+#   models/ folder; with no model present it prints "Missing File Detected" with
+#   the folder, file extension and expected function. A running backend is
+#   stopped with Ctrl+C, which returns to the menu instead of exiting AutoKernel.
+#   The generated start-image.sh launcher accepts a checkpoint path (passed to
+#   Forge as --ckpt) so the model chosen in option 31 is the one loaded.
+#   When a model is found, option 31 asks whether to run it in a new terminal
+#   window (autokernel_open_terminal: first of x-terminal-emulator,
+#   gnome-terminal, mate-terminal, xfce4-terminal, konsole, xterm; opened as
+#   SUDO_USER in the user's desktop session under sudo; kept open after exit)
+#   or in the current window, falling back to the current window when no
+#   desktop session or terminal is available.
+#
 # AutoKernel(29)-ChatGPT
 #   [GODDESSMATRIX][V14.44] Restored EXEC as the ordinary host/system command
 #   surface and moved local GGUF selection/launch into SERVER. SERVER now keeps
@@ -380,6 +420,2079 @@ OS_Selector() {
         else
             printf '%s\n' "${HOME:-$AUTOKERNEL_DIR}"
         fi
+    }
+
+    # ------------------------------------------------------------------------
+    # Driver tools (menu options 22 / 23, tiers 4-7).
+    # AutoKernel generates three standalone setup scripts from the bodies below
+    # and runs them:
+    #   kernel-headers-setup.sh  custom-kernel headers + build compiler for DKMS
+    #   gpu-npu-drivers.sh       GPU / NPU detection and driver install
+    #   virtual-ai-drivers.sh    text / image-input / image-output AI backends
+    # They are regenerated on every use, so editing a body here is how they are
+    # updated. Each keeps its own install log in ~/.tmp for its -u uninstall.
+    # ------------------------------------------------------------------------
+    AK_DRIVER_TOOLS_DIR="${AK_DRIVER_TOOLS_DIR:-}"
+
+    # The AI stack (backends, models, caches) lives beside AutoKernel.sh like
+    # AutoKernel's other folders, instead of the tool's standalone ~/ai-stack.
+    autokernel_ai_stack_dir() {
+        printf '%s\n' "${AK_AI_STACK_DIR:-${AUTOKERNEL_WORKSPACE:-$AUTOKERNEL_DIR}/ai-stack}"
+    }
+
+    autokernel_driver_tools_dir() {
+        if [[ -z "$AK_DRIVER_TOOLS_DIR" ]]; then
+            AK_DRIVER_TOOLS_DIR="${AUTOKERNEL_WORKSPACE:-$AUTOKERNEL_DIR}/DriverTools"
+        fi
+        printf '%s\n' "$AK_DRIVER_TOOLS_DIR"
+    }
+
+    autokernel_write_driver_tools() {
+        local tools_dir
+        tools_dir="$(autokernel_driver_tools_dir)"
+        mkdir -p "$tools_dir" || { echo "Error: cannot create $tools_dir"; return 1; }
+
+    # ---- kernel-headers-setup.sh ------------------------------------------------------------
+    cat > "$tools_dir/kernel-headers-setup.sh" << 'EOF_AK_KERNEL_HEADERS'
+#!/usr/bin/env bash
+# =============================================================================
+#  kernel-headers-setup.sh  -  Make custom kernels buildable for DKMS drivers
+#
+#  DKMS (which compiles NVIDIA and other out-of-tree drivers) looks for a
+#  kernel's build files only at /lib/modules/<version>/build, and compiles
+#  with whatever "gcc" is on the system. A kernel you built yourself can fail
+#  on both counts. For every installed kernel that didn't come from a package,
+#  this script:
+#
+#    1. Finds its build tree (or asks for the folder you ran "make install" in)
+#    2. Checks that the tree has everything DKMS needs
+#    3. Detects which compiler built the kernel. If it differs from the system
+#       GCC, it finds that exact compiler on your system, or installs it from
+#       apt, or downloads and compiles that exact GCC version, and makes DKMS
+#       use it for that kernel only (your other kernels keep the system GCC)
+#    4. Copies or symlinks the build files to the standard location
+#    5. Test-builds a tiny module to prove driver builds now work
+#    6. Optionally rebuilds DKMS drivers and finishes stuck apt installs
+#
+#  Usage:
+#    ./kernel-headers-setup.sh       Set up (safe to re-run)
+#    ./kernel-headers-setup.sh -u    Undo everything this script did
+#
+#  Every change is recorded in ~/.tmp/.kernelclog, which -u uses to undo it.
+# =============================================================================
+set -euo pipefail
+
+MODULES_DIR="${MODULES_DIR:-/lib/modules}"
+USRSRC_DIR="${USRSRC_DIR:-/usr/src}"
+BOOT_DIR="${BOOT_DIR:-/boot}"
+GCC_PREFIX_ROOT="${GCC_PREFIX_ROOT:-/opt/kernel-gcc}"
+LOG_DIR="$HOME/.tmp"
+LOG="$LOG_DIR/.kernelclog"
+GCC_WORK="$LOG_DIR/kernel-gcc-build"
+
+log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+info() { printf '    %s\n' "$*"; }
+ok()   { printf '    \033[1;32m[ok]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*"; }
+bad()  { printf '    \033[1;31m[missing]\033[0m %s\n' "$*"; }
+die()  { printf '\033[1;31m[x] %s\033[0m\n' "$*"; exit 1; }
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [option]
+  (none)   Find custom kernels and make them ready for DKMS driver builds
+  -u       Undo everything this script did (uses $LOG)
+  -h       Show this help
+EOF
+}
+
+# =========================================================== change log ===
+# Fields are TAB-separated so paths with spaces survive:
+#   TMPDIR  <dir>                 ~/.tmp was created by this script
+#   COPY    <dir>                 headers copy in /usr/src created by this script
+#   LINK    <link>  <old target>  link this script set ("-" = didn't exist)
+#   BACKUP  <orig>  <backup>      real folder moved aside to make room
+#   SYSPATH <dir>                 compiler this script built and installed
+#   PATH    <dir>                 temporary folder in your home
+#   APT     <package>             apt package this script installed
+#   DONE    <version> <mode>      kernel finished (copy, symlink, copy+gcc)
+
+init_log() {
+    local created=0
+    if [[ ! -d $LOG_DIR ]]; then mkdir -p "$LOG_DIR"; created=1; fi
+    if [[ ! -f $LOG ]]; then
+        echo "# kernel headers setup log - used by 'kernel-headers-setup.sh -u'. Do not edit." > "$LOG"
+    fi
+    if [[ $created == 1 ]]; then record TMPDIR "$LOG_DIR"; fi
+}
+
+record() {
+    local line
+    line=$(IFS=$'\t'; echo "$*")
+    grep -qxF -- "$line" "$LOG" 2>/dev/null || echo "$line" >> "$LOG"
+}
+get_state() { awk -F'\t' -v k="$1" '$1=="DONE" && $2==k {s=$3} END {print s}' "$LOG"; }
+set_state() {
+    awk -F'\t' -v k="$1" '!($1=="DONE" && $2==k)' "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+    record DONE "$1" "$2"
+}
+
+# ================================================================== apt ===
+apt_get()        { sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; }
+is_installed()   { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
+installed_list() { dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null | awk 'substr($1,2,1) !~ /[nc]/ {print $2}' | sort -u; }
+pkg_available() {
+    local c
+    c=$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')
+    [[ -n $c && $c != "(none)" ]]
+}
+
+# Installs missing packages and logs every newly installed package
+# (including dependencies) so -u can remove them again.
+apt_install() {
+    local missing=() p before
+    for p in "$@"; do is_installed "$p" || missing+=("$p"); done
+    (( ${#missing[@]} )) || return 0
+    info "Installing: ${missing[*]}"
+    before=$(installed_list)
+    apt_get install -y "${missing[@]}" || true
+    while read -r p; do
+        if [[ -n $p ]]; then record APT "$p"; fi
+    done < <(comm -13 <(echo "$before") <(installed_list))
+    for p in "${missing[@]}"; do is_installed "$p" || { warn "Couldn't install $p"; return 1; }; done
+}
+
+# ===================================================== kernel inspection ===
+arch_dir() {
+    case "$(uname -m)" in
+        x86_64|i?86) echo x86 ;;
+        aarch64)     echo arm64 ;;
+        armv*)       echo arm ;;
+        *)           uname -m ;;
+    esac
+}
+
+# A kernel is "from a package" if dpkg owns its kernel image or modules.
+is_packaged() {
+    local v=$1
+    dpkg-query -S "$BOOT_DIR/vmlinuz-$v" >/dev/null 2>&1 ||
+    dpkg-query -S "$MODULES_DIR/$v/kernel" >/dev/null 2>&1
+}
+
+headers_ok() {
+    local b="$MODULES_DIR/$1/build"
+    [[ -f $b/Makefile && -f $b/.config && -f $b/Module.symvers &&
+       -f $b/include/generated/autoconf.h && -e $b/scripts/mod/modpost ]]
+}
+
+kconfig() { sed -n "s/^$2=\"\{0,1\}\([^\"]*\)\"\{0,1\}\$/\1/p" "$1/.config" 2>/dev/null; }
+
+# The part of "gcc --version" that identifies the exact compiler build, with
+# the program name removed: "gcc (GCC) 16.0.0 20251102 (experimental)" and
+# "gcc-16 (GCC) 16.0.0 20251102 (experimental)" are the same compiler.
+cc_id() { sed -E 's/^[^ ]+ //' <<<"$1"; }
+cc_version_line() { "$1" --version 2>/dev/null | head -n1; }
+
+# Loads each of the kernel's GCC plugins into a compiler. Plugins only load
+# into the exact GCC build they were made for, so this is the decisive test.
+plugins_load() {
+    local cc=$1 tree=$2 so
+    for so in "$tree"/scripts/gcc-plugins/*.so; do
+        [[ -e $so ]] || continue
+        echo 'int x;' | "$cc" -fplugin="$so" -x c -c -o /dev/null - >/dev/null 2>&1 || return 1
+    done
+    return 0
+}
+
+# Checks a kernel build tree.
+#   returns 0: usable with the system GCC
+#           1: unusable (files missing or wrong version)
+#           2: usable, but only with the compiler that built the kernel
+check_tree() {
+    local t=$1 want=$2 fail=0 arch rel f
+    arch=$(arch_dir)
+
+    if [[ -f $t/include/config/kernel.release ]]; then
+        rel=$(< "$t/include/config/kernel.release")
+        if [[ $rel == "$want" ]]; then ok "Kernel version matches: $rel"
+        else bad "This tree is for kernel '$rel', not '$want'"; return 1; fi
+    else
+        bad "include/config/kernel.release - this folder hasn't been built (run 'make' in it)"
+        return 1
+    fi
+
+    for f in Makefile .config Module.symvers include/generated/autoconf.h \
+             include/generated/utsrelease.h "arch/$arch/include/generated" \
+             scripts/mod/modpost scripts/basic/fixdep; do
+        if [[ -e $t/$f ]]; then ok "$f"; else bad "$f"; fail=1; fi
+    done
+    if [[ $(kconfig "$t" CONFIG_OBJTOOL) == y ]]; then
+        if [[ -x $t/tools/objtool/objtool ]]; then ok "tools/objtool/objtool"
+        else bad "tools/objtool/objtool"; fail=1; fi
+    fi
+    if [[ $(kconfig "$t" CONFIG_MODULE_SIG) == y ]]; then
+        if [[ -x $t/scripts/sign-file ]]; then ok "scripts/sign-file (module signing)"
+        else bad "scripts/sign-file (needed to sign modules)"; fail=1; fi
+    fi
+    if [[ $(kconfig "$t" CONFIG_GCC_PLUGINS) == y ]]; then
+        if compgen -G "$t/scripts/gcc-plugins/*.so" >/dev/null; then ok "scripts/gcc-plugins/*.so"
+        else bad "scripts/gcc-plugins/*.so (GCC plugins)"; fail=1; fi
+    fi
+    if (( fail )); then
+        warn "Some build files are missing. Usually 'make clean' removed them."
+        warn "Fix: in that folder run   make -j\$(nproc)   (same .config), then re-run this script."
+        return 1
+    fi
+
+    if [[ $(kconfig "$t" CONFIG_CC_IS_CLANG) == y ]]; then
+        warn "This kernel was built with Clang. DKMS uses GCC; Clang-built kernels"
+        warn "usually need 'LLVM=1' set for DKMS builds. Not handled by this script."
+        return 0
+    fi
+
+    KERNEL_CC=$(kconfig "$t" CONFIG_CC_VERSION_TEXT)
+    local sys
+    sys=$(cc_version_line gcc || true)
+    info "Kernel was compiled with: $KERNEL_CC"
+    info "System compiler:          ${sys:-(gcc not installed)}"
+    if [[ -z $sys ]]; then
+        warn "gcc isn't installed, so nothing can be compiled yet (sudo apt install build-essential)."
+        return 1
+    fi
+    if [[ $(cc_id "$KERNEL_CC") == "$(cc_id "$sys")" ]]; then
+        ok "Same compiler"
+        return 0
+    fi
+    if [[ $(kconfig "$t" CONFIG_GCC_PLUGINS) == y ]]; then
+        warn "Different compiler, and this kernel uses GCC plugins, which only load into"
+        warn "the exact GCC build that made them. Drivers must use the kernel's compiler."
+        return 2
+    fi
+    local km sm
+    km=$(grep -oE '[0-9]+\.[0-9]+' <<<"$(cc_id "$KERNEL_CC")" | head -n1 | cut -d. -f1)
+    sm=$(grep -oE '[0-9]+\.[0-9]+' <<<"$(cc_id "$sys")" | head -n1 | cut -d. -f1)
+    if [[ $km != "$sm" ]]; then
+        warn "Different GCC major version ($km vs $sm). Drivers should use the kernel's compiler."
+        return 2
+    fi
+    info "Minor compiler difference only; driver builds normally work fine."
+    return 0
+}
+
+# ============================================== finding the right compiler ===
+cc_matches() {
+    local cc=$1 tree=$2 line
+    line=$(cc_version_line "$cc") || return 1
+    [[ $(cc_id "$line") == "$(cc_id "$KERNEL_CC")" ]] || return 1
+    plugins_load "$cc" "$tree"
+}
+
+candidate_ccs() {
+    local n
+    {
+        compgen -c | grep -E '^(x86_64-linux-gnu-)?gcc(-[0-9][0-9.]*)?$' | sort -u |
+            while read -r n; do command -v "$n"; done
+        printf '%s\n' /usr/local/bin/gcc* /usr/local/*/bin/gcc /opt/*/bin/gcc* \
+                      /opt/*/*/bin/gcc* "$GCC_PREFIX_ROOT"/*/bin/gcc \
+                      /usr/lib/gcc-snapshot/bin/gcc "$HOME"/.local/bin/gcc* \
+                      "$HOME"/*/bin/gcc "$HOME"/.*/bin/gcc
+    } 2>/dev/null | while read -r n; do
+        [[ -f $n && -x $n ]] && readlink -f "$n"
+    done | awk '!seen[$0]++'
+}
+
+# Sets FOUND_CC to the compiler that built the kernel, if it's on this system.
+find_matching_cc() {
+    local tree=$1 c answer
+    FOUND_CC=""
+    info "Looking for '$KERNEL_CC' on this system..."
+    while read -r c; do
+        if cc_matches "$c" "$tree"; then FOUND_CC=$c; return 0; fi
+    done < <(candidate_ccs)
+
+    read -r -p "    Not in the usual places. Search the whole system (may take a minute)? [Y/n] " answer || true
+    if [[ ! $answer =~ ^[Nn] ]]; then
+        while read -r c; do
+            if cc_matches "$c" "$tree"; then FOUND_CC=$c; return 0; fi
+        done < <(find / \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o \
+                      -type f \( -name gcc -o -name 'gcc-[0-9]*' -o -name 'x86_64-*-gcc' \) \
+                      -path '*/bin/*' -perm -u+x -print 2>/dev/null)
+    fi
+    read -e -r -p "    If you know where it is, enter the path to that gcc (or leave empty): " c || true
+    if [[ -n $c ]]; then
+        if cc_matches "$c" "$tree"; then FOUND_CC=$(readlink -f "$c"); return 0; fi
+        warn "$c is not the compiler that built this kernel ($(cc_version_line "$c" || echo 'not runnable'))"
+    fi
+    return 1
+}
+
+# Installs or compiles the exact compiler named in $KERNEL_CC. Sets FOUND_CC.
+obtain_cc() {
+    local tree=$1 id vendor ver major date phase answer
+    id=$(cc_id "$KERNEL_CC")
+    vendor=$(sed -nE 's/^[^(]*\(([^)]*)\).*/\1/p' <<<"$KERNEL_CC")
+    ver=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' <<<"${id#*) }" | head -n1 || true)
+    major=${ver%%.*}
+    date=$(grep -oE '(^| )[0-9]{8}( |$)' <<<"${id#*) }" | tr -d ' ' | head -n1 || true)
+    phase=$(grep -oE '\((experimental|prerelease)\)' <<<"$id" | tr -d '()' || true)
+
+    if [[ $vendor == Debian* ]]; then
+        info "That compiler is Debian's GCC $major."
+        local pkgs=("gcc-$major")
+        [[ $(kconfig "$tree" CONFIG_GCC_PLUGINS) == y ]] && pkgs+=("gcc-$major-plugin-dev")
+        if ! pkg_available "gcc-$major"; then
+            warn "gcc-$major isn't available from your repositories."; return 1
+        fi
+        apt_install "${pkgs[@]}" || return 1
+        if cc_matches "/usr/bin/gcc-$major" "$tree"; then FOUND_CC="/usr/bin/gcc-$major"; return 0; fi
+        warn "Debian's current gcc-$major ($(cc_version_line "/usr/bin/gcc-$major")) isn't the same"
+        warn "build as the one that compiled this kernel, and its plugins won't load."
+        return 1
+    fi
+    if [[ $vendor != "GCC" || -z $ver ]]; then
+        warn "Don't know how to obtain '$KERNEL_CC' automatically."
+        return 1
+    fi
+
+    local name url="" branch=""
+    if [[ -n $date ]]; then
+        name="gcc-$major-$date"
+        url="https://gcc.gnu.org/pub/gcc/snapshots/$major-$date/gcc-$major-$date.tar.xz"
+        if [[ $phase == prerelease ]]; then branch="releases/gcc-$major"; else branch="master"; fi
+    else
+        name="gcc-$ver"
+        url="https://ftp.gnu.org/gnu/gcc/gcc-$ver/gcc-$ver.tar.xz"
+    fi
+    local prefix="$GCC_PREFIX_ROOT/$name"
+
+    if cc_matches "$prefix/bin/gcc" "$tree"; then FOUND_CC="$prefix/bin/gcc"; return 0; fi
+    echo
+    warn "The exact compiler ($KERNEL_CC) isn't on this system."
+    info "This script can download GCC's source for that version and compile it into"
+    info "$prefix. It's only used for building drivers for this kernel."
+    info "It needs about 10 GB of temporary space and takes roughly 1-2 hours."
+    read -r -p "    Download and compile $name now? [y/N] " answer || true
+    [[ $answer =~ ^[Yy]$ ]] || return 1
+
+    build_gcc "$name" "$url" "$branch" "$date" "$prefix" || return 1
+    if cc_matches "$prefix/bin/gcc" "$tree"; then FOUND_CC="$prefix/bin/gcc"; return 0; fi
+    warn "The compiled GCC runs, but the kernel's plugins still won't load into it."
+    warn "Its exact build differs from the original ($(cc_version_line "$prefix/bin/gcc"))."
+    return 1
+}
+
+build_gcc() {
+    local name=$1 url=$2 branch=$3 date=$4 prefix=$5
+    log "Building $name"
+    apt_install build-essential libgmp-dev libmpfr-dev libmpc-dev flex bison \
+                curl xz-utils git || return 1
+
+    record PATH "$GCC_WORK"
+    rm -rf "$GCC_WORK"
+    mkdir -p "$GCC_WORK/src" "$GCC_WORK/build"
+
+    local mirror got=0 tail="${url#https://gcc.gnu.org/pub/gcc/}"
+    for mirror in "$url" \
+                  "https://ftp.cs.uni-frankfurt.de/misc/gcc/$tail" \
+                  "https://cygnus.mirrorservice.org/gcc/$tail"; do
+        [[ $mirror == "$url" || $url == https://gcc.gnu.org/* ]] || continue
+        info "Downloading $mirror"
+        if curl -fL --retry 3 -o "$GCC_WORK/src.tar.xz" "$mirror"; then got=1; break; fi
+    done
+    if (( got )); then
+        tar -xJf "$GCC_WORK/src.tar.xz" -C "$GCC_WORK/src" --strip-components=1
+        rm -f "$GCC_WORK/src.tar.xz"
+    elif [[ -n $branch ]]; then
+        # Old snapshots get deleted from the server; rebuild the same day from git.
+        info "Snapshot no longer on the server; using GCC's git history for $date instead"
+        git clone --filter=blob:none --no-checkout --single-branch --branch "$branch" \
+            https://gcc.gnu.org/git/gcc.git "$GCC_WORK/src"
+        local when commit
+        when="${date:0:4}-${date:4:2}-${date:6:2} 23:59:59 +0000"
+        commit=$(git -C "$GCC_WORK/src" rev-list -1 --before="$when" "$branch")
+        [[ -n $commit ]] || { warn "No GCC commit found for $date"; return 1; }
+        git -C "$GCC_WORK/src" checkout -q "$commit"
+        info "Using commit $commit (version date $(< "$GCC_WORK/src/gcc/DATESTAMP"))"
+    else
+        warn "Couldn't download $url"; return 1
+    fi
+
+    info "Configuring"
+    ( cd "$GCC_WORK/build" && "$GCC_WORK/src/configure" --prefix="$prefix" \
+        --enable-languages=c --enable-plugin --disable-multilib --disable-werror ) \
+        > "$GCC_WORK/configure.log" 2>&1 || { warn "configure failed, see $GCC_WORK/configure.log"; return 1; }
+
+    info "Compiling (full 3-stage bootstrap, the same way GCC is normally built)."
+    info "This is the long part. Progress: $GCC_WORK/build.log"
+    ( cd "$GCC_WORK/build" && make -j"$(nproc)" ) > "$GCC_WORK/build.log" 2>&1 \
+        || { tail -n 20 "$GCC_WORK/build.log"; warn "GCC build failed, see $GCC_WORK/build.log"; return 1; }
+
+    record SYSPATH "$prefix"
+    ( cd "$GCC_WORK/build" && sudo make install ) > "$GCC_WORK/install.log" 2>&1 \
+        || { warn "GCC install failed, see $GCC_WORK/install.log"; return 1; }
+    ok "Installed $name to $prefix"
+    rm -rf "$GCC_WORK"
+}
+
+# Makes the headers copy compile with a specific compiler. Only the copy in
+# /usr/src is changed, never your own kernel source folder. "override" wins
+# over every later CC assignment, and over a CC= that a driver's own build
+# script might pass on the make command line; filtering MAKEOVERRIDES stops
+# such a CC= from reaching the sub-builds that compile each file.
+pin_compiler() {
+    local dir=$1 cc=$2 v=$3 mk tmp
+    mk="$dir/Makefile"
+
+    # Driver build scripts (NVIDIA's included) compare "$CC --version" with the
+    # kernel's record, which includes the program name ("gcc"). A compiler
+    # installed as "gcc-16" prints "gcc-16 (GCC) ...", so give it a "gcc"
+    # name. GCC follows the link to find the rest of its own files.
+    if [[ $(basename "$cc") != gcc ]]; then
+        local linkdir="$GCC_PREFIX_ROOT/$v-cc"
+        record SYSPATH "$linkdir"
+        sudo mkdir -p "$linkdir"
+        sudo ln -sfn -- "$cc" "$linkdir/gcc"
+        cc="$linkdir/gcc"
+    fi
+
+    if grep -q '^# >>> kernel-headers-setup.sh' "$mk"; then
+        sudo sed -i '/^# >>> kernel-headers-setup.sh/,/^# <<< kernel-headers-setup.sh/d' "$mk"
+    fi
+    tmp=$(mktemp)
+    {
+        echo "# >>> kernel-headers-setup.sh: drivers must use the compiler this kernel was built with"
+        echo "override CC := $cc"
+        echo 'MAKEOVERRIDES := $(filter-out CC=%,$(MAKEOVERRIDES))'
+        echo "# <<< kernel-headers-setup.sh"
+        cat "$mk"
+    } > "$tmp"
+    sudo cp "$tmp" "$mk"
+    rm -f "$tmp"
+    info "Driver builds for this kernel will use: $cc"
+
+    # The kernel passes its GCC plugins as "-fplugin=./scripts/gcc-plugins/...",
+    # relative to the kernel folder. NVIDIA's feature tests (conftest) compile
+    # from a different folder, can't find the plugins, fail, and the driver then
+    # misdetects the kernel. Absolute paths work from anywhere.
+    local f n=0
+    while read -r f; do
+        sudo sed -i "s#\$(objtree)/scripts/gcc-plugins/#$dir/scripts/gcc-plugins/#g" "$f"
+        n=$((n + 1))
+    done < <(grep -rlF '$(objtree)/scripts/gcc-plugins/' "$dir/Makefile" "$dir/scripts" "$dir/arch" \
+                 --include='Makefile*' 2>/dev/null || true)
+    if (( n )); then info "Made the GCC plugin paths absolute in $n build file(s)"
+    elif [[ $(kconfig "$dir" CONFIG_GCC_PLUGINS) == y ]] && ! grep -rqF "$dir/scripts/gcc-plugins/" "$dir/scripts" 2>/dev/null; then
+        warn "Couldn't find where this kernel sets its GCC plugin paths; NVIDIA's feature"
+        warn "tests may still fail. Please report: grep -rn fplugin $dir/scripts/Makefile.*"
+    fi
+}
+
+# ============================================================== linking ===
+set_link() {
+    local link=$1 target=$2 old="-"
+    if [[ -L $link ]]; then
+        old=$(readlink "$link")
+    elif [[ -e $link ]]; then
+        local backup="$link.kernelc-backup"
+        info "Moving existing folder $link aside to $backup"
+        sudo mv -- "$link" "$backup"
+        record BACKUP "$link" "$backup"
+    fi
+    if ! awk -F'\t' -v l="$link" '$1=="LINK" && $2==l {f=1} END {exit !f}' "$LOG"; then
+        record LINK "$link" "$old"
+    fi
+    sudo ln -sfn -- "$target" "$link"
+    info "$link -> $target"
+}
+
+copy_tree() {
+    local src=$1 dest=$2
+    if [[ $(readlink -f "$src") == "$(readlink -f "$dest")" ]]; then return 0; fi
+    if [[ -e $dest ]] && ! grep -qF "$(printf 'COPY\t%s' "$dest")" "$LOG"; then
+        die "$dest already exists and wasn't created by this script. Remove or rename it first."
+    fi
+    info "Copying build files to $dest (skipping object files, git data and docs)"
+    record COPY "$dest"
+    sudo rm -rf -- "$dest"
+    sudo mkdir -p -- "$dest"
+    sudo tar -C "$src" \
+        --exclude='./.git' --exclude='./Documentation' \
+        --exclude='*.o' --exclude='*.ko' --exclude='*.a' --exclude='*.mod.c' \
+        -cf - . | sudo tar -C "$dest" -xf -
+    info "Copied $(sudo du -sh "$dest" | cut -f1)"
+}
+
+# Builds a tiny "hello" module the same way DKMS builds drivers.
+test_build() {
+    local v=$1 d rc
+    d=$(mktemp -d)
+    cat > "$d/kc_test.c" <<'EOF'
+#include <linux/module.h>
+MODULE_LICENSE("GPL");
+static int __init kc_init(void) { return 0; }
+static void __exit kc_exit(void) { }
+module_init(kc_init);
+module_exit(kc_exit);
+EOF
+    echo 'obj-m := kc_test.o' > "$d/Makefile"
+    info "Test-building a small module against $v..."
+    if make -C "$MODULES_DIR/$v/build" M="$d" modules > "$d/log" 2>&1 && [[ -f $d/kc_test.ko ]]; then
+        ok "Test module built: driver builds for $v work"
+        rc=0
+    else
+        bad "Test module failed to build. Last lines of the build output:"
+        grep -E 'error|Error' "$d/log" | tail -n 8 | sed 's/^/        /'
+        rc=1
+    fi
+    rm -rf "$d"
+    return $rc
+}
+
+# ============================================================== kernels ===
+setup_kernel() {
+    local v=$1 tree="" mode answer rc target cc=""
+    log "Kernel $v"
+
+    if [[ $(get_state "$v") == copy+gcc ]] && headers_ok "$v"; then
+        local pinned dir
+        dir=$(readlink -f "$MODULES_DIR/$v/build")
+        pinned=$(sed -n 's/^override CC := //p' "$dir/Makefile" | head -n1)
+        if [[ -n $pinned ]]; then
+            pin_compiler "$dir" "$(readlink -f "$pinned")" "$v" >/dev/null
+            touch "$CHANGED_FLAG"
+        fi
+    fi
+    if [[ -n $(get_state "$v") ]] && headers_ok "$v" && test_build "$v"; then
+        info "Already set up ($(get_state "$v")), skipping"
+        return 0
+    fi
+
+    if headers_ok "$v"; then
+        tree=$(readlink -f "$MODULES_DIR/$v/build")
+        info "Headers found at $MODULES_DIR/$v/build -> $tree"
+        if check_tree "$tree" "$v"; then rc=0; else rc=$?; fi
+        (( rc == 1 )) && return 1
+        if (( rc == 0 )); then
+            if test_build "$v"; then ok "Nothing to change"; return 0; fi
+            warn "The headers look complete, but the test build fails (errors above)."
+            return 1
+        fi
+    else
+        info "Current link: $(readlink "$MODULES_DIR/$v/build" 2>/dev/null || echo '(none)')"
+        while true; do
+            echo
+            info "Enter the full path, starting from /, to the kernel source folder"
+            info "where you ran 'make' and 'make install' for this kernel."
+            info "(Tab completes paths. Leave empty to skip this kernel.)"
+            read -e -r -p "    Path: " tree || true
+            [[ -z $tree ]] && { info "Skipped"; return 0; }
+            tree="${tree%/}"
+            if [[ $tree != /* ]]; then warn "The path must start with /"; continue; fi
+            if [[ ! -d $tree ]]; then warn "No folder at $tree"; continue; fi
+            echo
+            if check_tree "$tree" "$v"; then rc=0; else rc=$?; fi
+            (( rc != 1 )) && break
+            read -r -p "    Try a different folder? [Y/n] " answer || true
+            [[ $answer =~ ^[Nn] ]] && return 1
+        done
+    fi
+
+    target="$USRSRC_DIR/linux-headers-$v"
+    if (( rc == 2 )); then
+        log "Matching compiler for $v"
+        if ! find_matching_cc "$tree" && ! obtain_cc "$tree"; then
+            warn "Without the kernel's own compiler, drivers can't be built for $v."
+            warn "The alternative is rebuilding this kernel with the system GCC."
+            return 1
+        fi
+        cc=$FOUND_CC
+        ok "Found the kernel's compiler: $cc"
+        info "A headers copy is needed so the compiler can be set without touching your source folder."
+        mode="copy+gcc"
+    else
+        echo
+        info "How should the headers be made available?"
+        info "  c) Copy the needed files to $target  (recommended:"
+        info "     keeps working even if you move, clean or delete your source folder)"
+        info "  s) Symlink to $tree  (no extra disk space, but the folder"
+        info "     must stay where it is and must not be cleaned)"
+        read -r -p "    Choice [C/s]: " mode || true
+        if [[ $mode =~ ^[Ss] ]]; then mode="symlink"; target="$tree"; else mode="copy"; fi
+    fi
+
+    if [[ $mode != symlink ]]; then copy_tree "$tree" "$target"; fi
+    if [[ $mode == copy+gcc ]]; then pin_compiler "$target" "$cc" "$v" || return 1; fi
+    set_link "$MODULES_DIR/$v/build"  "$target"
+    set_link "$MODULES_DIR/$v/source" "$target"
+
+    if headers_ok "$v" && test_build "$v"; then
+        set_state "$v" "$mode"
+        touch "$CHANGED_FLAG"
+    else
+        warn "Setup finished, but the test build still fails (see above)."
+        return 1
+    fi
+}
+
+offer_rebuild() {
+    [[ -e $CHANGED_FLAG ]] || return 0
+    local answer v
+    if command -v dkms >/dev/null 2>&1; then
+        echo
+        read -r -p "Rebuild DKMS drivers (e.g. NVIDIA) for the fixed kernel(s) now? [Y/n] " answer || true
+        if [[ ! $answer =~ ^[Nn] ]]; then
+            for v in "${KERNELS[@]}"; do
+                [[ -n $(get_state "$v") ]] || continue
+                log "Building DKMS modules for $v"
+                if ! sudo dkms autoinstall -k "$v"; then
+                    warn "DKMS build failed for $v (see the log path printed above)"
+                    echo "$v" >> "$DKMS_FAILED"
+                fi
+            done
+        fi
+    fi
+    if dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null | awk '$1 !~ /^(ii|rc|un|pn)/' | grep -q .; then
+        echo
+        warn "Some packages are half-installed (for example nvidia-driver after a failed build)."
+        read -r -p "Finish configuring them now (sudo dpkg --configure -a)? [Y/n] " answer || true
+        [[ $answer =~ ^[Nn] ]] || sudo dpkg --configure -a || warn "Some packages still couldn't be configured"
+    fi
+    return 0
+}
+
+do_setup() {
+    init_log
+    CHANGED_FLAG="$(mktemp -u)"
+    DKMS_FAILED="$(mktemp)"
+    trap 'rm -f "$CHANGED_FLAG" "$DKMS_FAILED"' EXIT
+    KERNELS=()
+    local d v running custom=() failed=() rc
+    running=$(uname -r)
+
+    log "Installed kernels"
+    for d in "$MODULES_DIR"/*/; do
+        v=$(basename "$d")
+        [[ -d $d/kernel || -f $d/modules.order ]] || continue
+        local tag="" hdr
+        [[ $v == "$running" ]] && tag=" (running)"
+        if headers_ok "$v"; then hdr="headers found"; else hdr="headers MISSING"; fi
+        if is_packaged "$v"; then
+            info "$v$tag - from a package, $hdr"
+            if [[ $hdr == "headers MISSING" ]]; then
+                info "    -> install its headers package, e.g.: sudo apt install linux-headers-$v"
+            fi
+        else
+            info "$v$tag - CUSTOM (not from a package), $hdr"
+            custom+=("$v")
+        fi
+    done
+
+    if (( ${#custom[@]} == 0 )); then
+        echo; info "No custom kernels found. Nothing to do."
+        return 0
+    fi
+    KERNELS=("${custom[@]}")
+
+    for v in "${custom[@]}"; do
+        set +e; ( set -e; setup_kernel "$v" ); rc=$?; set -e
+        (( rc == 0 )) || failed+=("$v")
+    done
+
+    offer_rebuild
+
+    log "Summary"
+    for v in "${custom[@]}"; do
+        if [[ " ${failed[*]} " == *" $v "* ]]; then bad "$v: driver builds still won't work"
+        else ok "$v: kernel set up for driver builds ($(get_state "$v" | sed 's/^$/no changes needed/'))"; fi
+        if grep -qxF "$v" "$DKMS_FAILED"; then
+            bad "$v: but DKMS drivers (e.g. NVIDIA) still failed to build. Check:"
+            info "    grep -nE 'error:' /var/lib/dkms/*/*/build/make.log | head"
+        fi
+    done
+    (( ${#failed[@]} == 0 )) || warn "Not finished: ${failed[*]}. Re-run the script after fixing the issues above."
+    echo
+    info "Change log: $LOG   (undo with: $(basename "$0") -u)"
+}
+
+# ============================================================== undo ===
+do_uninstall() {
+    [[ -f $LOG ]] || { echo "No log at $LOG - nothing to undo."; exit 0; }
+
+    local links=() olds=() copies=() borig=() bback=() syspaths=() paths=() pkgs=() kind a b i
+    while IFS=$'\t' read -r kind a b; do
+        case "$kind" in
+            LINK)    links+=("$a"); olds+=("$b") ;;
+            COPY)    copies+=("$a") ;;
+            BACKUP)  borig+=("$a"); bback+=("$b") ;;
+            SYSPATH) syspaths+=("$a") ;;
+            PATH)    paths+=("$a") ;;
+            APT)     if is_installed "$a"; then pkgs+=("$a"); fi ;;
+        esac
+    done < "$LOG"
+
+    echo "This will:"
+    for i in "${!links[@]}"; do
+        if [[ ${olds[$i]} == "-" ]]; then echo "    remove link ${links[$i]}"
+        else echo "    restore ${links[$i]} -> ${olds[$i]}"; fi
+    done
+    for i in "${!borig[@]}"; do echo "    move ${bback[$i]} back to ${borig[$i]}"; done
+    for a in "${copies[@]}";   do echo "    delete the headers copy $a"; done
+    for a in "${syspaths[@]}"; do echo "    delete the compiler this script built: $a"; done
+    (( ${#pkgs[@]} )) && echo "    remove ${#pkgs[@]} apt package(s) this script installed"
+    echo "Your kernel source folders are never touched. Drivers already built by"
+    echo "DKMS keep working, but can't be rebuilt for those kernels afterwards."
+    local answer
+    read -r -p "Proceed? [y/N] " answer || true
+    [[ $answer =~ ^[Yy]$ ]] || { echo "Cancelled."; exit 0; }
+
+    for i in "${!links[@]}"; do
+        sudo rm -f -- "${links[$i]}"
+        if [[ ${olds[$i]} != "-" ]]; then sudo ln -sfn -- "${olds[$i]}" "${links[$i]}"; fi
+        info "Restored ${links[$i]}"
+    done
+    for i in "${!borig[@]}"; do
+        if [[ -e ${bback[$i]} && ! -e ${borig[$i]} ]]; then sudo mv -- "${bback[$i]}" "${borig[$i]}"; fi
+    done
+    for a in "${copies[@]}"; do
+        if [[ $a == "$USRSRC_DIR"/linux-headers-?* && $a != *..* ]]; then sudo rm -rf -- "$a"; info "Deleted $a"
+        else warn "Refusing to delete $a"; fi
+    done
+    for a in "${syspaths[@]}"; do
+        if [[ $a == "$GCC_PREFIX_ROOT"/?* && $a != *..* ]]; then sudo rm -rf -- "$a"; info "Deleted $a"
+        else warn "Refusing to delete $a"; fi
+    done
+    rmdir "$GCC_PREFIX_ROOT" 2>/dev/null || true
+    for a in "${paths[@]}"; do
+        if [[ $a == "$LOG_DIR"/?* && $a != *..* ]]; then rm -rf -- "$a"; fi
+    done
+
+    if (( ${#pkgs[@]} > 0 )); then
+        log "Removing apt packages"
+        sudo apt-mark auto "${pkgs[@]}" >/dev/null
+        local removable=()
+        mapfile -t removable < <(comm -12 \
+            <(printf '%s\n' "${pkgs[@]}" | sort -u) \
+            <(apt-get -s autoremove 2>/dev/null | awk '/^Remv /{sub(/:.*/,"",$2); print $2}' | sort -u))
+        if (( ${#removable[@]} > 0 )); then apt_get purge -y "${removable[@]}"; fi
+        if (( ${#removable[@]} < ${#pkgs[@]} )); then
+            info "Some packages were kept because other software depends on them."
+        fi
+    fi
+
+    local tmpdir_created=0
+    grep -q $'^TMPDIR\t' "$LOG" && tmpdir_created=1
+    rm -f -- "$LOG"
+    if [[ $tmpdir_created == 1 ]]; then rmdir "$LOG_DIR" 2>/dev/null || true; fi
+    log "Undo complete"
+}
+
+# ================================================================ main ===
+[[ $EUID -ne 0 ]] || die "Run this as your normal user, not root. It asks for sudo when needed."
+
+case "${1:-}" in
+    "")              do_setup ;;
+    -u|--uninstall)  do_uninstall ;;
+    -h|--help)       usage ;;
+    *)               usage; exit 1 ;;
+esac
+EOF_AK_KERNEL_HEADERS
+
+    # ---- gpu-npu-drivers.sh ------------------------------------------------------------
+    cat > "$tools_dir/gpu-npu-drivers.sh" << 'EOF_AK_GPU_DRIVERS'
+#!/usr/bin/env bash
+# =============================================================================
+#  gpu-npu-drivers.sh  -  Detect and install GPU / NPU drivers on LMDE 7
+#                         (Debian 13 "trixie")
+#
+#  Detects (via lspci):
+#    NVIDIA GPUs  -> Debian's NVIDIA driver (kernel module compiled by DKMS)
+#    AMD GPUs     -> firmware, Mesa (OpenGL/Vulkan/video), ROCm info tools
+#    Intel GPUs   -> firmware, Mesa, media driver, OpenCL compute runtime
+#    Intel NPUs   -> Intel's NPU user-space driver (latest GitHub release)
+#    AMD NPUs     -> AMD XDNA driver + XRT, compiled from source (optional,
+#                    experimental; you are asked before it starts)
+#
+#  Usage:
+#    ./gpu-npu-drivers.sh       Install. Safe to re-run: finished parts are
+#                               skipped, and failed parts are retried.
+#    ./gpu-npu-drivers.sh -u    Uninstall everything this script installed.
+#
+#  Everything installed is recorded in ~/.tmp/.driverlog. Only apt packages
+#  that were NOT already on the system are recorded, so -u never removes
+#  drivers or software you had before running this script.
+# =============================================================================
+set -euo pipefail
+
+LOG_DIR="$HOME/.tmp"
+LOG="$LOG_DIR/.driverlog"
+SRC_DIR="$LOG_DIR/driver-src"          # downloads and source builds
+MOK_COPY="$LOG_DIR/driver-mok.pub"     # copy of the Secure Boot key we enrolled
+ARCH="$(dpkg --print-architecture)"
+ME="$(id -un)"
+FLAG_DIR=""
+FAILED=()
+
+log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+info() { printf '    %s\n' "$*"; }
+warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*"; }
+die()  { printf '\033[1;31m[x] %s\033[0m\n' "$*"; exit 1; }
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [option]
+  (none)   Detect GPUs/NPUs and install their drivers (safe to re-run)
+  -u       Uninstall everything this script installed (uses $LOG)
+  -h       Show this help
+EOF
+}
+
+# =========================================================== install log ===
+# Line formats:
+#   TMPDIR <dir>      ~/.tmp was created by this script
+#   APT <package>     apt package this script installed (incl. dependencies)
+#   PATH <path>       file or folder in your home created by this script
+#   SYSFILE <path>    system file created by this script (e.g. udev rule)
+#   GROUP <group>     group your user was added to
+#   REMOVED <package> your package that apt replaced (reinstalled on -u)
+#   DONE <part> <how> finished component
+
+init_log() {
+    local created=0
+    if [[ ! -d $LOG_DIR ]]; then mkdir -p "$LOG_DIR"; created=1; fi
+    if [[ ! -f $LOG ]]; then
+        echo "# GPU/NPU driver install log - used by 'gpu-npu-drivers.sh -u'. Do not edit." > "$LOG"
+    fi
+    if [[ $created == 1 ]]; then record "TMPDIR $LOG_DIR"; fi
+}
+
+record()    { grep -qxF -- "$*" "$LOG" 2>/dev/null || echo "$*" >> "$LOG"; }
+get_state() { awk -v c="$1" '$1=="DONE" && $2==c {s=$3} END {print s}' "$LOG"; }
+set_state() { sed -i "/^DONE $1 /d" "$LOG"; echo "DONE $1 $2" >> "$LOG"; }
+
+flag()     { touch "$FLAG_DIR/$1"; }
+has_flag() { [[ -e $FLAG_DIR/$1 ]]; }
+
+# ================================================================== apt ===
+apt_get()        { sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; }
+is_installed()   { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
+# Every package present on disk, including ones left half-configured by a failed install.
+installed_list() { dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null | awk 'substr($1,2,1) !~ /[nc]/ {print $2}' | sort -u; }
+is_present() {
+    local s
+    s=$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null) || return 1
+    s=${s##* }
+    [[ $s != "not-installed" && $s != "config-files" ]]
+}
+pkg_available() {
+    local c
+    c=$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')
+    [[ -n $c && $c != "(none)" ]]
+}
+
+# Every package that appears between begin_track and end_track is logged,
+# including dependencies and anything a vendor build script installs.
+SNAP=""
+begin_track() { SNAP=$(installed_list); }
+end_track() {
+    local p
+    while read -r p; do
+        if [[ -n $p ]]; then record "APT $p"; fi
+    done < <(comm -13 <(echo "$SNAP") <(installed_list))
+    while read -r p; do
+        if [[ -n $p ]] && ! grep -qxF "APT $p" "$LOG"; then
+            info "apt replaced your existing package '$p' (it will be restored on -u)"
+            record "REMOVED $p"
+        fi
+    done < <(comm -23 <(echo "$SNAP") <(installed_list))
+}
+
+apt_install() {
+    local missing=() p
+    for p in "$@"; do is_installed "$p" || missing+=("$p"); done
+    if (( ${#missing[@]} == 0 )); then info "Already installed: $*"; return 0; fi
+    info "Installing: ${missing[*]}"
+    # apt also fails when an UNRELATED package is broken (e.g. a failed NVIDIA
+    # build), so check what actually got installed instead of trusting its exit code.
+    apt_get install -y "${missing[@]}" || true
+    local still=()
+    for p in "${missing[@]}"; do is_installed "$p" || still+=("$p"); done
+    if (( ${#still[@]} )); then warn "Not installed: ${still[*]}"; return 1; fi
+}
+
+# Like apt_install, but quietly skips packages your repositories don't offer.
+apt_install_available() {
+    local ok=() p
+    for p in "$@"; do
+        if is_installed "$p" || pkg_available "$p"; then ok+=("$p")
+        else info "Not in your repositories, skipping: $p"; fi
+    done
+    if (( ${#ok[@]} > 0 )); then apt_install "${ok[@]}"; fi
+}
+
+# ======================================================= system changes ===
+add_group() {
+    local g=$1
+    getent group "$g" >/dev/null || return 0
+    if id -nG "$ME" | tr ' ' '\n' | grep -qx "$g"; then return 0; fi
+    info "Adding $ME to the '$g' group"
+    sudo usermod -aG "$g" "$ME"
+    record "GROUP $g"
+    flag relogin
+}
+
+write_sysfile() {
+    local path=$1 content=$2
+    if [[ -f $path && $(cat "$path") == "$content" ]]; then return 0; fi
+    if [[ -e $path ]] && ! grep -qxF "SYSFILE $path" "$LOG"; then
+        warn "$path already exists and wasn't created by this script; leaving it alone"
+        return 0
+    fi
+    sudo mkdir -p "$(dirname "$path")"
+    printf '%s\n' "$content" | sudo tee "$path" >/dev/null
+    record "SYSFILE $path"
+}
+
+track_src() { mkdir -p "$1"; record "PATH $SRC_DIR"; }
+
+# Prints download URLs of the latest GitHub release assets matching a regex.
+gh_latest_assets() {
+    curl -fsSL "https://api.github.com/repos/$1/releases/latest" | python3 -c '
+import json, re, sys
+pattern = re.compile(sys.argv[1])
+for a in json.load(sys.stdin).get("assets", []):
+    n = a["name"]
+    if pattern.search(n) and not any(x in n for x in ("dbgsym", "devel", "-dev_")):
+        print(a["browser_download_url"])' "$2"
+}
+
+download() { info "Downloading $(basename "$1")"; curl -fL --retry 3 -o "$2/$(basename "$1")" "$1"; }
+
+# ============================================================ detection ===
+HAS_NVIDIA=0; HAS_AMD=0; HAS_INTEL=0; HAS_INTEL_NPU=0; HAS_AMD_NPU=0
+GPU_LINES=(); NPU_LINES=()
+
+detect() {
+    local l
+    mapfile -t GPU_LINES < <(lspci -nn | grep -E '\[(0300|0302|0380)\]' || true)
+    for l in "${GPU_LINES[@]}"; do
+        case "$l" in
+            *"[10de:"*) HAS_NVIDIA=1 ;;
+            *"[1002:"*) HAS_AMD=1 ;;
+            *"[8086:"*) HAS_INTEL=1 ;;
+        esac
+    done
+    # Intel NPUs are PCI class 1200 (processing accelerator).
+    # AMD NPUs (Ryzen AI / XDNA) are 1022:1502 (Phoenix, Hawk Point) and 1022:17f0 (Strix and newer).
+    local intel_npu amd_npu
+    intel_npu=$(lspci -nn -d 8086::1200 2>/dev/null || true)
+    amd_npu=$( { lspci -nn -d 1022:1502; lspci -nn -d 1022:17f0; } 2>/dev/null || true)
+    [[ -n $intel_npu ]] && HAS_INTEL_NPU=1 && NPU_LINES+=("$intel_npu")
+    [[ -n $amd_npu ]]   && HAS_AMD_NPU=1   && NPU_LINES+=("$amd_npu")
+    return 0
+}
+
+print_detection() {
+    log "Detected hardware"
+    local l
+    if (( ${#GPU_LINES[@]} )); then for l in "${GPU_LINES[@]}"; do info "GPU: $l"; done
+    else info "GPU: none found"; fi
+    if (( ${#NPU_LINES[@]} )); then for l in "${NPU_LINES[@]}"; do info "NPU: $l"; done
+    else info "NPU: none found"; fi
+    info "Kernel: $(uname -r)    Secure Boot: $(secure_boot_on && echo on || echo off)"
+}
+
+secure_boot_on() {
+    local f=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+    [[ -r $f ]] || return 1
+    [[ $(od -An -t u1 -j4 -N1 "$f" | tr -d ' ') == 1 ]]
+}
+
+# =========================================================== components ===
+install_nvidia() {
+    log "NVIDIA GPU driver"
+    if [[ -n $(get_state nvidia) ]]; then info "Already installed ($(get_state nvidia)), skipping"; return 0; fi
+
+    if ! pkg_available nvidia-detect; then
+        warn "NVIDIA drivers aren't available from your repositories. Enable the"
+        warn "'contrib' and 'non-free' components in Software Sources (mintsources),"
+        warn "then run this script again."
+        return 1
+    fi
+    apt_install nvidia-detect
+
+    # Debian's nvidia-detect picks the right driver series for your card.
+    local report rec
+    report=$(nvidia-detect 2>&1 || true)
+    rec=$(awk '/recommended to install the/ {getline; print $1; exit}' <<<"$report")
+    if [[ -z $rec ]]; then
+        warn "Debian's driver doesn't list support for this card. nvidia-detect said:"
+        printf '%s\n' "$report" | sed 's/^/      /'
+        warn "Very new cards can need a newer driver than Debian 13 ships."
+        return 1
+    fi
+    info "Recommended driver package: $rec"
+
+    # Kernel headers metapackage keeps DKMS rebuilding the module on kernel updates.
+    apt_install "linux-headers-$ARCH" dkms
+    apt_install_available firmware-misc-nonfree
+    apt_install "$rec" || {
+        # Make sure -u can remove the half-configured packages a failed build leaves.
+        local p
+        for p in "$rec" nvidia-kernel-dkms; do
+            if is_present "$p" && grep -q '^APT .*nvidia' "$LOG"; then record "APT $p"; fi
+        done
+        warn "The NVIDIA kernel module failed to compile. Its build log is at:"
+        warn "  /var/lib/dkms/nvidia-current/*/build/make.log"
+        return 1
+    }
+    apt_install_available nvidia-smi
+    set_state nvidia "$rec"
+    flag reboot
+}
+
+install_amd_gpu() {
+    log "AMD GPU support (the amdgpu kernel driver is built into the kernel)"
+    if [[ -n $(get_state amdgpu) ]]; then info "Already installed, skipping"; return 0; fi
+    apt_install_available firmware-amd-graphics libgl1-mesa-dri mesa-vulkan-drivers \
+                          mesa-va-drivers vulkan-tools rocminfo
+    add_group render
+    add_group video
+    set_state amdgpu installed
+    flag reboot
+}
+
+install_intel_gpu() {
+    log "Intel GPU support (the i915/xe kernel drivers are built into the kernel)"
+    if [[ -n $(get_state intelgpu) ]]; then info "Already installed, skipping"; return 0; fi
+    apt_install_available firmware-intel-graphics firmware-misc-nonfree libgl1-mesa-dri \
+                          mesa-vulkan-drivers intel-media-va-driver-non-free vulkan-tools \
+                          intel-opencl-icd clinfo
+    add_group render
+    add_group video
+    set_state intelgpu installed
+    flag reboot
+}
+
+install_intel_npu() {
+    log "Intel NPU driver"
+    if [[ -n $(get_state intelnpu) ]]; then info "Already installed, skipping"; return 0; fi
+    if ! modinfo intel_vpu >/dev/null 2>&1; then
+        warn "Kernel $(uname -r) has no intel_vpu module, so the NPU can't be used yet."
+        return 1
+    fi
+    apt_install curl ca-certificates python3
+
+    local d="$SRC_DIR/intel-npu" f urls=() debs=() u
+    track_src "$d"
+    rm -rf "${d:?}"/*
+
+    # Intel publishes the NPU user-space driver only as Ubuntu 24.04 packages,
+    # which install fine on Debian 13.
+    mapfile -t urls < <(gh_latest_assets intel/linux-npu-driver 'ubuntu24\.?04.*\.(deb|tar\.gz)$')
+    (( ${#urls[@]} )) || { warn "Couldn't find Intel NPU driver packages on GitHub"; return 1; }
+    for u in "${urls[@]}"; do download "$u" "$d"; done
+    for f in "$d"/*.tar.gz; do
+        if [[ -e $f ]]; then tar -xzf "$f" -C "$d"; fi
+    done
+
+    # The oneAPI Level Zero loader the NPU driver plugs into.
+    if ! is_installed libze1 && ! is_installed level-zero; then
+        mapfile -t urls < <(gh_latest_assets oneapi-src/level-zero 'u24\.04_amd64\.deb$')
+        for u in "${urls[@]}"; do download "$u" "$d"; done
+    fi
+
+    mapfile -t debs < <(find "$d" -name '*.deb' ! -name '*dbgsym*' | sort)
+    (( ${#debs[@]} )) || { warn "No .deb packages found in the download"; return 1; }
+    info "Installing: $(printf '%s ' "${debs[@]##*/}")"
+    apt_get install -y "${debs[@]}"
+
+    write_sysfile /etc/udev/rules.d/10-intel-vpu.rules \
+        'SUBSYSTEM=="accel", KERNEL=="accel*", GROUP="render", MODE="0660"'
+    sudo udevadm control --reload-rules || true
+    add_group render
+    set_state intelnpu installed
+    flag reboot
+}
+
+install_amd_npu() {
+    log "AMD NPU driver (XDNA + XRT, compiled from source)"
+    if [[ -n $(get_state amdnpu) ]]; then info "Already installed, skipping"; return 0; fi
+    warn "This builds AMD's driver from source. It's experimental on Debian,"
+    warn "downloads several GB and can take 30-60 minutes."
+    local answer
+    read -r -p "    Build the AMD NPU driver now? [y/N] " answer
+    if [[ ! $answer =~ ^[Yy]$ ]]; then info "Skipped. Re-run the script any time to build it."; return 0; fi
+
+    apt_install git build-essential cmake dkms "linux-headers-$ARCH"
+    local d="$SRC_DIR/xdna-driver" deb
+    track_src "$SRC_DIR"
+    if [[ ! -d $d/.git ]]; then
+        rm -rf "$d"
+        git clone https://github.com/amd/xdna-driver.git "$d"
+    fi
+    git -C "$d" submodule update --init --recursive
+
+    info "Installing AMD's build dependencies"
+    ( cd "$d" && sudo ./tools/amdxdna_deps.sh )
+
+    info "Building XRT (Xilinx Runtime)"
+    ( cd "$d/xrt/build" && ./build.sh -npu -opt )
+    deb=$(find "$d/xrt/build/Release" -maxdepth 1 -name 'xrt_*-base.deb' | head -n1)
+    [[ -n $deb ]] || { warn "XRT package wasn't produced"; return 1; }
+    apt_get install -y "$deb"
+
+    info "Building the XDNA kernel driver and plugin"
+    ( cd "$d/build" && ./build.sh -release && ./build.sh -package )
+    deb=$(find "$d/build" -name 'xrt_plugin*amdxdna*.deb' | head -n1)
+    [[ -n $deb ]] || { warn "XDNA plugin package wasn't produced"; return 1; }
+    apt_get install -y "$deb"
+
+    add_group render
+    set_state amdnpu built
+    flag reboot
+}
+
+# With Secure Boot on, the kernel only loads DKMS-built modules (NVIDIA, AMD
+# NPU) once DKMS's signing key is enrolled in the firmware.
+setup_mok() {
+    [[ -n $(get_state nvidia) || -n $(get_state amdnpu) ]] || return 0
+    [[ -n $(get_state mok) ]] && return 0
+    secure_boot_on || return 0
+
+    log "Secure Boot key for the compiled drivers"
+    local key=/var/lib/dkms/mok.pub
+    if ! sudo test -f "$key"; then
+        warn "Secure Boot is on, but DKMS's signing key ($key) wasn't found."
+        warn "The compiled drivers may not load until a key is enrolled."
+        return 1
+    fi
+    apt_install mokutil
+    if sudo mokutil --test-key "$key" 2>&1 | grep -q 'already enrolled'; then
+        info "Key already enrolled"
+        set_state mok preexisting
+        return 0
+    fi
+    info "Choose a one-time password now. You'll type it once on the next boot."
+    sudo mokutil --import "$key"
+    sudo cat "$key" > "$MOK_COPY"
+    record "PATH $MOK_COPY"
+    set_state mok imported
+    flag mok
+    flag reboot
+}
+
+# Custom-compiled kernels often can't build DKMS drivers (headers in an odd
+# place, or built with a different compiler). kernel-headers-setup.sh fixes
+# that, so run it first when it sits next to this script.
+prepare_custom_kernels() {
+    local d v custom=() helper answer
+    for d in /lib/modules/*/; do
+        v=$(basename "$d")
+        [[ -d $d/kernel ]] || continue
+        dpkg-query -S "/boot/vmlinuz-$v" >/dev/null 2>&1 && continue
+        custom+=("$v")
+    done
+    (( ${#custom[@]} )) || return 0
+
+    log "Custom kernel(s) found: ${custom[*]}"
+    info "Compiled drivers (NVIDIA, AMD NPU) are built for every installed kernel,"
+    info "and one unbuildable custom kernel makes the whole driver install fail."
+    helper="$(dirname "$(readlink -f "$0")")/kernel-headers-setup.sh"
+    if [[ ! -f $helper ]]; then
+        warn "Put kernel-headers-setup.sh next to this script to prepare them automatically."
+        return 0
+    fi
+    read -r -p "    Check and prepare them now with kernel-headers-setup.sh? [Y/n] " answer
+    [[ $answer =~ ^[Nn] ]] && return 0
+    bash "$helper" || warn "kernel-headers-setup.sh reported problems; continuing anyway"
+}
+
+# Runs one component with its own error handling, so one failure doesn't stop
+# the others, and logs every package it installed even if it failed halfway.
+run_component() {
+    local rc
+    begin_track
+    set +e
+    ( set -e; "$1" )
+    rc=$?
+    set -e
+    end_track
+    if (( rc != 0 )); then FAILED+=("$1"); fi
+}
+
+status_of() {
+    local s
+    s=$(get_state "$1")
+    case "$s" in
+        "")        echo "not installed" ;;
+        installed) echo "installed" ;;
+        *)         echo "installed ($s)" ;;
+    esac
+}
+
+print_summary() {
+    log "Summary"
+    (( HAS_NVIDIA ))    && info "NVIDIA GPU : $(status_of nvidia)"
+    (( HAS_AMD ))       && info "AMD GPU    : $(status_of amdgpu)"
+    (( HAS_INTEL ))     && info "Intel GPU  : $(status_of intelgpu)"
+    (( HAS_INTEL_NPU )) && info "Intel NPU  : $(status_of intelnpu)"
+    (( HAS_AMD_NPU ))   && info "AMD NPU    : $(status_of amdnpu)"
+    if (( ${#FAILED[@]} )); then
+        warn "Didn't finish: ${FAILED[*]#install_}. See the messages above, then re-run to retry."
+    fi
+    if has_flag mok; then
+        echo
+        info "On the next boot a blue 'MOK management' screen appears. Choose"
+        info "'Enroll MOK' -> 'Continue' -> 'Yes', type the password you just set,"
+        info "then 'Reboot'. If you skip it, the compiled drivers won't load."
+    fi
+    if has_flag reboot; then
+        echo; warn "Reboot to activate the new drivers."
+    elif has_flag relogin; then
+        echo; warn "Log out and back in so the new group membership takes effect."
+    fi
+    echo
+    info "After rebooting, run virtual-ai-drivers.sh again so it picks up the GPU."
+    info "Install log: $LOG   (uninstall with: $(basename "$0") -u)"
+}
+
+do_install() {
+    init_log
+    FLAG_DIR=$(mktemp -d)
+    trap 'rm -rf "$FLAG_DIR"' EXIT
+
+    log "Updating package lists"
+    apt_get update
+    if ! command -v lspci >/dev/null 2>&1; then
+        begin_track; apt_install pciutils; end_track
+    fi
+
+    detect
+    print_detection
+    if (( HAS_NVIDIA + HAS_AMD + HAS_INTEL + HAS_INTEL_NPU + HAS_AMD_NPU == 0 )); then
+        info "No supported GPUs or NPUs found. Nothing to do."
+        return 0
+    fi
+    local answer
+    read -r -p "Install drivers for the devices above? [Y/n] " answer
+    [[ $answer =~ ^[Nn] ]] && return 0
+
+    if (( HAS_NVIDIA || HAS_AMD_NPU )) && [[ -z $(get_state nvidia) ]]; then
+        prepare_custom_kernels
+    fi
+    if (( HAS_NVIDIA ));    then run_component install_nvidia;    fi
+    if (( HAS_AMD ));       then run_component install_amd_gpu;   fi
+    if (( HAS_INTEL ));     then run_component install_intel_gpu; fi
+    if (( HAS_INTEL_NPU )); then run_component install_intel_npu; fi
+    if (( HAS_AMD_NPU ));   then run_component install_amd_npu;   fi
+    run_component setup_mok
+    print_summary
+}
+
+# =========================================================== uninstall ===
+do_uninstall() {
+    [[ -f $LOG ]] || { echo "No install log at $LOG - nothing to uninstall."; exit 0; }
+
+    local pkgs=() paths=() sysfiles=() groups=() removed=() p
+    while read -r p; do
+        if [[ -n $p ]] && is_present "$p"; then pkgs+=("$p"); fi
+    done < <(sed -n 's/^APT //p' "$LOG")
+    while read -r p; do
+        if [[ -n $p ]] && ! is_installed "$p"; then removed+=("$p"); fi
+    done < <(sed -n 's/^REMOVED //p' "$LOG")
+    mapfile -t paths    < <(sed -n 's/^PATH //p'    "$LOG")
+    mapfile -t sysfiles < <(sed -n 's/^SYSFILE //p' "$LOG")
+    mapfile -t groups   < <(sed -n 's/^GROUP //p'   "$LOG")
+
+    echo "This will remove:"
+    echo "    ${#pkgs[@]} apt package(s) this script installed (drivers, firmware, tools)"
+    for p in "${sysfiles[@]}"; do echo "    $p"; done
+    for p in "${paths[@]}";    do echo "    $p"; done
+    for p in "${groups[@]}";   do echo "    $ME from the '$p' group"; done
+    for p in "${removed[@]}";  do echo "    and reinstall your original package: $p"; done
+    if [[ $(get_state nvidia) ]]; then
+        echo "After a reboot, NVIDIA cards fall back to the open-source nouveau driver,"
+        echo "and the ai-stack backends will no longer use the GPU."
+    fi
+    local answer
+    read -r -p "Proceed? [y/N] " answer
+    [[ $answer =~ ^[Yy]$ ]] || { echo "Cancelled."; exit 0; }
+
+    # Secure Boot key first, while mokutil is still installed.
+    if [[ $(get_state mok) == "imported" && -f $MOK_COPY ]] && command -v mokutil >/dev/null; then
+        read -r -p "Also remove the driver signing key from Secure Boot? [Y/n] " answer
+        if [[ ! $answer =~ ^[Nn] ]]; then
+            info "Choose a one-time password; confirm the deletion on the next boot."
+            sudo mokutil --delete "$MOK_COPY" || warn "Key removal wasn't scheduled"
+        fi
+    fi
+
+    for p in "${sysfiles[@]}"; do sudo rm -f -- "$p"; done
+    (( ${#sysfiles[@]} )) && { sudo udevadm control --reload-rules || true; }
+
+    for p in "${groups[@]}"; do sudo gpasswd -d "$ME" "$p" >/dev/null || true; done
+
+    for p in "${paths[@]}"; do
+        if [[ $p == "$LOG_DIR"/?* && $p != *..* ]]; then rm -rf -- "$p"
+        else warn "Refusing to delete $p"; fi
+    done
+
+    # Packages a failed install left half-configured are ours and broken:
+    # remove them directly first, since apt's dependency checks would choke on them.
+    local broken=()
+    for p in "${pkgs[@]}"; do is_installed "$p" || broken+=("$p"); done
+    if (( ${#broken[@]} )); then
+        log "Removing half-installed packages: ${broken[*]}"
+        apt_get purge -y "${broken[@]}" || sudo dpkg --purge --force-depends "${broken[@]}" || true
+    fi
+
+    # Put back packages apt replaced during install (this also swaps out their replacements).
+    if (( ${#removed[@]} )); then
+        log "Restoring your original packages: ${removed[*]}"
+        apt_get install -y "${removed[@]}" || warn "Couldn't reinstall: ${removed[*]}"
+    fi
+
+    local remaining=()
+    for p in "${pkgs[@]}"; do is_present "$p" && remaining+=("$p"); done
+    pkgs=("${remaining[@]}")
+
+    if (( ${#pkgs[@]} > 0 )); then
+        log "Removing apt packages"
+        # Mark them as automatically installed, then remove only those that
+        # nothing else on the system still depends on.
+        sudo apt-mark auto "${pkgs[@]}" >/dev/null
+        local removable=() still_needed=()
+        mapfile -t removable < <(comm -12 \
+            <(printf '%s\n' "${pkgs[@]}" | sort -u) \
+            <(apt-get -s autoremove 2>/dev/null | awk '/^Remv /{sub(/:.*/,"",$2); print $2}' | sort -u))
+        if (( ${#removable[@]} > 0 )); then apt_get purge -y "${removable[@]}"; fi
+        mapfile -t still_needed < <(comm -23 \
+            <(printf '%s\n' "${pkgs[@]}" | sort -u) \
+            <(printf '%s\n' "${removable[@]}" | sort -u))
+        if (( ${#still_needed[@]} > 0 )) && [[ -n ${still_needed[0]} ]]; then
+            warn "Kept because other software depends on them: ${still_needed[*]}"
+        fi
+    fi
+
+    local tmpdir_created=0
+    grep -q '^TMPDIR ' "$LOG" && tmpdir_created=1
+    rm -f -- "$LOG"
+    if [[ $tmpdir_created == 1 ]]; then rmdir "$LOG_DIR" 2>/dev/null || true; fi
+
+    log "Uninstall complete. Reboot to finish switching drivers."
+}
+
+# ================================================================ main ===
+[[ $EUID -ne 0 ]] || die "Run this as your normal user, not root. It asks for sudo when needed."
+
+case "${1:-}" in
+    "")              do_install ;;
+    -u|--uninstall)  do_uninstall ;;
+    -h|--help)       usage ;;
+    *)               usage; exit 1 ;;
+esac
+EOF_AK_GPU_DRIVERS
+
+    # ---- virtual-ai-drivers.sh ------------------------------------------------------------
+    cat > "$tools_dir/virtual-ai-drivers.sh" << 'EOF_AK_VIRTUAL_AI'
+#!/usr/bin/env bash
+# =============================================================================
+#  virtual-ai-drivers.sh  -  Three-backend local AI stack for LMDE 7 (Debian 13)
+#
+#    Text in/out   : llama.cpp  (llama-server)        -> http://127.0.0.1:8080
+#    Image input   : vLLM       (OpenAI-compatible)   -> http://127.0.0.1:8000
+#    Image output  : Stable Diffusion WebUI Forge API -> http://127.0.0.1:7860
+#
+#  Usage:
+#    ./virtual-ai-drivers.sh       Install. Safe to re-run: finished parts are
+#                              skipped, and parts that need a GPU are added or
+#                              upgraded once the NVIDIA driver is working.
+#    ./virtual-ai-drivers.sh -u    Uninstall everything this script installed.
+#
+#  Everything installed is recorded in ~/.tmp/.installlog, which is what -u
+#  uses to undo the install. Only apt packages that were NOT already on the
+#  system are recorded, so -u never removes software you had before.
+# =============================================================================
+set -euo pipefail
+
+# ----------------------------------------------------------------- layout ---
+# The whole stack lives in one folder. AutoKernel sets STACK_DIR to the
+# "ai-stack" folder beside AutoKernel.sh; run on its own, it is ~/ai-stack.
+STACK_DIR="${STACK_DIR:-$HOME/ai-stack}"
+STACK_DIR="${STACK_DIR%/}"
+
+set_layout() {
+    TEXT_MODELS="$STACK_DIR/models/text"      # your .gguf goes here
+    VISION_MODELS="$STACK_DIR/models/vision"  # your vision model folder goes here
+    IMAGE_MODELS="$STACK_DIR/models/image"    # your SD .safetensors goes here
+
+    LLAMA_DIR="$STACK_DIR/backends/llama.cpp"
+    VLLM_DIR="$STACK_DIR/backends/vllm"
+    FORGE_DIR="$STACK_DIR/backends/forge"
+    TOOLS_DIR="$STACK_DIR/tools"
+    CACHE_DIR="$STACK_DIR/cache"
+    BIN_DIR="$STACK_DIR/bin"
+
+    # Keep every download cache inside the stack folder, so nothing is left
+    # scattered around ~/.cache after an uninstall.
+    export UV_CACHE_DIR="$CACHE_DIR/uv"
+    export UV_PYTHON_INSTALL_DIR="$TOOLS_DIR/python"
+    export PIP_CACHE_DIR="$CACHE_DIR/pip"
+    export HF_HOME="$CACHE_DIR/huggingface"
+    export XDG_CACHE_HOME="$CACHE_DIR/xdg"
+
+    UV="$TOOLS_DIR/uv-venv/bin/uv"
+}
+set_layout
+
+LOG_DIR="$HOME/.tmp"
+LOG="$LOG_DIR/.installlog"
+
+TEXT_PORT=8080
+VISION_PORT=8000
+IMAGE_PORT=7860
+
+
+log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+info() { printf '    %s\n' "$*"; }
+warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*"; }
+die()  { printf '\033[1;31m[x] %s\033[0m\n' "$*"; exit 1; }
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [option]
+  (none)   Install, or finish a previous install (e.g. after adding GPU drivers)
+  -u       Uninstall everything this script installed (uses $LOG)
+  -h       Show this help
+EOF
+}
+
+# =========================================================== install log ===
+# Line formats in the log:
+#   TMPDIR <dir>      ~/.tmp was created by this script
+#   APT <package>     apt package this script installed (incl. dependencies)
+#   PATH <path>       file or folder this script created (deleted on -u)
+#   MODELDIR <dir>    model folder (deleted on -u only if empty)
+#   PARENT <dir>      container folder (deleted on -u only if empty)
+#   DONE <part> <how> a finished component and how it was built
+#   STACKDIR <dir>    where the stack was installed (latest line wins)
+
+init_log() {
+    local created=0
+    if [[ ! -d $LOG_DIR ]]; then mkdir -p "$LOG_DIR"; created=1; fi
+    if [[ ! -f $LOG ]]; then
+        echo "# ai-stack install log - used by 'virtual-ai-drivers.sh -u'. Do not edit." > "$LOG"
+    fi
+    if [[ $created == 1 ]]; then record "TMPDIR $LOG_DIR"; fi
+}
+
+record()    { grep -qxF -- "$*" "$LOG" 2>/dev/null || echo "$*" >> "$LOG"; }
+get_state() { awk -v c="$1" '$1=="DONE" && $2==c {s=$3} END {print s}' "$LOG"; }
+set_state() { sed -i "/^DONE $1 /d" "$LOG"; echo "DONE $1 $2" >> "$LOG"; }
+
+# Create folders (if missing) and record them under the given kind.
+track_dir() {
+    local kind=$1; shift
+    local d
+    for d in "$@"; do
+        mkdir -p "$d"
+        record "$kind $d"
+    done
+}
+
+# ================================================================== apt ===
+is_installed()   { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
+installed_list() { dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null | awk '$1 ~ /^ii/ {print $2}' | sort -u; }
+
+APT_UPDATED=0
+# Installs only the packages that are missing, and logs every package that
+# ends up newly installed (including automatic dependencies).
+apt_install() {
+    local missing=() p
+    for p in "$@"; do is_installed "$p" || missing+=("$p"); done
+    if (( ${#missing[@]} == 0 )); then
+        info "Already installed: $*"
+        return 0
+    fi
+    info "Installing: ${missing[*]}"
+    local before after rc=0
+    before=$(installed_list)
+    if [[ $APT_UPDATED == 0 ]]; then sudo apt-get update; APT_UPDATED=1; fi
+    sudo apt-get install -y "${missing[@]}" || rc=$?
+    after=$(installed_list)
+    while read -r p; do
+        [[ -n $p ]] && record "APT $p"
+    done < <(comm -13 <(echo "$before") <(echo "$after"))
+    return $rc
+}
+
+# ============================================================= install ===
+detect_gpu() {
+    GPU="cpu"
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+        GPU="nvidia"
+    fi
+}
+
+install_apt_packages() {
+    log "System packages (apt)"
+    apt_install git build-essential cmake pkg-config curl wget ca-certificates \
+                python3 python3-venv python3-pip \
+                libgl1 libglib2.0-0 google-perftools pciutils bc
+
+    if [[ $GPU == "nvidia" ]]; then
+        if ! apt_install nvidia-cuda-toolkit; then
+            warn "nvidia-cuda-toolkit could not be installed (the non-free repository"
+            warn "may be disabled). llama.cpp will stay on CPU until it is available."
+        fi
+    fi
+}
+
+install_uv() {
+    log "uv (private Python versions for vLLM and Forge)"
+    track_dir PATH "$TOOLS_DIR" "$CACHE_DIR"
+    if [[ -x $UV ]]; then
+        info "Already installed"
+        return
+    fi
+    python3 -m venv "$TOOLS_DIR/uv-venv"
+    "$TOOLS_DIR/uv-venv/bin/pip" install --quiet --upgrade pip uv
+}
+
+build_llama() {
+    rm -rf "$LLAMA_DIR/build"
+    cmake -S "$LLAMA_DIR" -B "$LLAMA_DIR/build" -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF "$@" &&
+    cmake --build "$LLAMA_DIR/build" --config Release -j"$(nproc)" --target llama-server
+}
+
+install_llama() {
+    log "Backend 1/3 (text): llama.cpp"
+    local want="cpu" have
+    if [[ $GPU == "nvidia" ]] && command -v nvcc >/dev/null 2>&1; then want="cuda"; fi
+    have=$(get_state llama)
+
+    if [[ $have == "cuda" || ( $have == "cpu" && $want == "cpu" ) ]]; then
+        info "Already built ($have), skipping"
+        return
+    fi
+    [[ $have == "cpu" ]] && info "CUDA is now available: rebuilding the CPU build with GPU support"
+
+    record "PATH $LLAMA_DIR"
+    if [[ ! -d $LLAMA_DIR/.git ]]; then
+        rm -rf "$LLAMA_DIR"
+        git clone --depth 1 https://github.com/ggml-org/llama.cpp "$LLAMA_DIR"
+    fi
+
+    if [[ $want == "cuda" ]]; then
+        if build_llama -DGGML_CUDA=ON; then set_state llama cuda; return; fi
+        warn "CUDA build failed; building for CPU instead"
+    fi
+    build_llama || die "llama.cpp build failed"
+    set_state llama cpu
+}
+
+install_vllm() {
+    log "Backend 2/3 (image input): vLLM"
+    if [[ -n $(get_state vllm) ]]; then
+        info "Already installed, skipping"
+        return
+    fi
+    if [[ $GPU != "nvidia" ]]; then
+        warn "No working NVIDIA GPU/driver detected, so vLLM was skipped."
+        warn "Install the driver, reboot, and run this script again to add it."
+        return
+    fi
+    record "PATH $VLLM_DIR"
+    [[ -x $VLLM_DIR/venv/bin/python ]] || "$UV" venv --python 3.12 "$VLLM_DIR/venv"
+    "$UV" pip install --python "$VLLM_DIR/venv/bin/python" vllm
+    set_state vllm cuda
+}
+
+find_py310() {
+    PY310=$(ls -d "$UV_PYTHON_INSTALL_DIR"/cpython-3.10*/bin/python3.10 2>/dev/null | head -n1 || true)
+}
+
+write_forge_config() {
+    local args="--api --nowebui --port $IMAGE_PORT --ckpt-dir \"$IMAGE_MODELS\""
+    [[ $GPU != "nvidia" ]] && args="$args --always-cpu --skip-torch-cuda-test"
+    # Forge reads this on every start: Python 3.10, API-only, your model folder.
+    cat > "$FORGE_DIR/webui-user.sh" <<EOF
+#!/bin/bash
+# Generated by virtual-ai-drivers.sh
+python_cmd="$PY310"
+export COMMANDLINE_ARGS='$args'
+export PIP_CACHE_DIR="$PIP_CACHE_DIR"
+export HF_HOME="$HF_HOME"
+export XDG_CACHE_HOME="$XDG_CACHE_HOME"
+EOF
+}
+
+install_forge() {
+    log "Backend 3/3 (image output): Stable Diffusion WebUI Forge"
+    local have
+    have=$(get_state forge)
+
+    if [[ $have == "nvidia" || ( $have == "cpu" && $GPU == "cpu" ) ]]; then
+        info "Already installed ($have), skipping"
+        return
+    fi
+
+    find_py310
+    if [[ $have == "cpu" ]]; then
+        # PyTorch from the first install already supports CUDA; only the
+        # CPU-only launch flags need to go.
+        info "GPU now available: switching Forge from CPU to GPU mode"
+        write_forge_config
+        set_state forge nvidia
+        return
+    fi
+
+    record "PATH $FORGE_DIR"
+    if [[ ! -d $FORGE_DIR/.git ]]; then
+        rm -rf "$FORGE_DIR"
+        git clone https://github.com/lllyasviel/stable-diffusion-webui-forge "$FORGE_DIR"
+    fi
+    if [[ -z $PY310 ]]; then "$UV" python install 3.10; find_py310; fi
+    [[ -n $PY310 ]] || die "Could not set up Python 3.10 for Forge"
+
+    write_forge_config
+    [[ $GPU != "nvidia" ]] && warn "Forge will run on CPU for now. Each image will be slow."
+    info "First-time setup downloads PyTorch (several GB)"
+    ( cd "$FORGE_DIR" && ./webui.sh --exit ) || die "Forge first-time setup failed"
+    set_state forge "$GPU"
+}
+
+write_launchers() {
+    log "Launcher scripts"
+    track_dir PATH "$BIN_DIR"
+
+    local cache_env
+    cache_env="export HF_HOME=\"$HF_HOME\" XDG_CACHE_HOME=\"$XDG_CACHE_HOME\""
+
+    cat > "$BIN_DIR/start-text.sh" <<EOF
+#!/usr/bin/env bash
+# Starts llama.cpp on port $TEXT_PORT. Optional argument: path to a .gguf file.
+MODEL="\${1:-\$(find "$TEXT_MODELS" -maxdepth 1 -iname '*.gguf' ! -iname '*mmproj*' | sort | head -n1)}"
+if [[ -z "\$MODEL" ]]; then echo "No .gguf file found in $TEXT_MODELS"; exit 1; fi
+echo "Loading \$MODEL"
+exec "$LLAMA_DIR/build/bin/llama-server" -m "\$MODEL" \\
+    --host 127.0.0.1 --port $TEXT_PORT -c \${CTX:-8192} -ngl \${GPU_LAYERS:-999}
+EOF
+
+    cat > "$BIN_DIR/start-vision.sh" <<EOF
+#!/usr/bin/env bash
+# Starts vLLM on port $VISION_PORT. Optional argument: path to a model folder.
+if [[ ! -x "$VLLM_DIR/venv/bin/vllm" ]]; then
+    echo "vLLM is not installed yet. Install the NVIDIA driver, then re-run virtual-ai-drivers.sh."; exit 1
+fi
+$cache_env VLLM_CACHE_ROOT="$CACHE_DIR/vllm" TRITON_CACHE_DIR="$CACHE_DIR/triton"
+MODEL="\${1:-\$(find "$VISION_MODELS" -mindepth 2 -maxdepth 2 -name config.json -printf '%h\n' | sort | head -n1)}"
+if [[ -z "\$MODEL" ]]; then echo "No model folder (with config.json) found in $VISION_MODELS"; exit 1; fi
+echo "Loading \$MODEL"
+# vLLM normally claims 90% of VRAM. 0.45 leaves room for the other two backends.
+exec "$VLLM_DIR/venv/bin/vllm" serve "\$MODEL" \\
+    --host 127.0.0.1 --port $VISION_PORT \\
+    --max-model-len \${CTX:-8192} --gpu-memory-utilization \${VLLM_GPU_MEM:-0.45}
+EOF
+
+    cat > "$BIN_DIR/start-image.sh" <<EOF
+#!/usr/bin/env bash
+# Starts Forge's API on port $IMAGE_PORT (settings live in webui-user.sh).
+# Optional argument: path to a .safetensors checkpoint to load at start-up.
+cd "$FORGE_DIR" && exec ./webui.sh \${1:+--ckpt "\$1"}
+EOF
+    chmod +x "$BIN_DIR"/start-*.sh
+
+    record "PATH $STACK_DIR/stack.env"
+    cat > "$STACK_DIR/stack.env" <<EOF
+TEXT_URL=http://127.0.0.1:$TEXT_PORT
+VISION_URL=http://127.0.0.1:$VISION_PORT
+IMAGE_URL=http://127.0.0.1:$IMAGE_PORT
+TEXT_MODELS=$TEXT_MODELS
+VISION_MODELS=$VISION_MODELS
+IMAGE_MODELS=$IMAGE_MODELS
+BIN_DIR=$BIN_DIR
+EOF
+}
+
+status_of() {
+    local s
+    s=$(get_state "$1")
+    if [[ -n $s ]]; then echo "installed ($s)"; else echo "NOT installed yet (needs NVIDIA driver)"; fi
+}
+
+print_summary() {
+    cat <<EOF
+
+=============================================================================
+ Status
+   Text         llama.cpp : $(status_of llama)
+   Image input  vLLM      : $(status_of vllm)
+   Image output Forge     : $(status_of forge)
+
+ Put your model files in these folders:
+
+ 1. TEXT (GGUF file):
+    $TEXT_MODELS/
+
+ 2. IMAGE INPUT (vision model, safetensors):
+    $VISION_MODELS/<model-name>/
+      Copy the WHOLE model folder, including config.json, the tokenizer
+      files and preprocessor_config.json, not just the .safetensors files.
+
+ 3. IMAGE OUTPUT (Stable Diffusion checkpoint, safetensors):
+    $IMAGE_MODELS/
+
+ Start each backend in its own terminal:
+    $BIN_DIR/start-text.sh     -> http://127.0.0.1:$TEXT_PORT
+    $BIN_DIR/start-vision.sh   -> http://127.0.0.1:$VISION_PORT
+    $BIN_DIR/start-image.sh    -> http://127.0.0.1:$IMAGE_PORT
+
+ Install log: $LOG   (uninstall with: $(basename "$0") -u)
+=============================================================================
+EOF
+}
+
+# Where an earlier run installed the stack, if anywhere.
+# Logs from before STACKDIR was recorded name the stack root as the first PARENT.
+logged_stack_dir() {
+    local d
+    d=$(sed -n 's/^STACKDIR //p' "$LOG" 2>/dev/null | tail -n1)
+    [[ -n $d ]] || d=$(sed -n 's/^PARENT //p' "$LOG" 2>/dev/null | head -n1)
+    printf '%s\n' "$d"
+}
+
+# If the stack was installed somewhere else before (e.g. ~/ai-stack before
+# AutoKernel started placing it beside itself), offer to move it or keep it.
+resolve_stack_dir() {
+    local old answer
+    old=$(logged_stack_dir)
+    if [[ -n $old && $old != "$STACK_DIR" && -d $old ]]; then
+        warn "The AI stack is already installed at: $old"
+        info "This run would place it at:            $STACK_DIR"
+        info "  m) Move it there (your models move too; the Python environments"
+        info "     are rebuilt, since they can't be moved, about a 15-20 GB download)"
+        info "  k) Keep using $old"
+        read -r -p "    Choice [M/k]: " answer || true
+        if [[ $answer =~ ^[Kk] ]]; then
+            STACK_DIR=$old
+            set_layout
+            info "Keeping $old"
+        else
+            if [[ -e $STACK_DIR ]] && [[ -n $(ls -A "$STACK_DIR" 2>/dev/null) ]]; then
+                die "$STACK_DIR already exists and isn't empty. Move or remove it, then re-run."
+            fi
+            rmdir "$STACK_DIR" 2>/dev/null || true
+            mkdir -p "$(dirname "$STACK_DIR")"
+            log "Moving $old to $STACK_DIR"
+            mv -- "$old" "$STACK_DIR"
+            # Repoint the log's recorded paths at the new location.
+            awk -v o="$old" -v n="$STACK_DIR" '
+                ($1=="PATH" || $1=="PARENT" || $1=="MODELDIR") {
+                    p = substr($0, length($1) + 2)
+                    if (p == o || index(p, o "/") == 1) { print $1 " " n substr(p, length(o) + 1); next }
+                }
+                { print }' "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+            # Python virtual environments store absolute paths; rebuild them.
+            rm -rf -- "$VLLM_DIR/venv" "$FORGE_DIR/venv" "$TOOLS_DIR/uv-venv"
+            sed -i -e '/^DONE vllm /d' -e '/^DONE forge /d' "$LOG"
+        fi
+    fi
+    sed -i '/^STACKDIR /d' "$LOG"
+    echo "STACKDIR $STACK_DIR" >> "$LOG"
+}
+
+do_install() {
+    init_log
+    resolve_stack_dir
+    detect_gpu
+    log "Detected GPU: $GPU"
+
+    # Folders: the stack root and containers are removed on -u only if empty,
+    # and model folders are never deleted while they still hold your files.
+    track_dir PARENT "$STACK_DIR" "$STACK_DIR/backends" "$STACK_DIR/models"
+    track_dir MODELDIR "$TEXT_MODELS" "$VISION_MODELS" "$IMAGE_MODELS"
+
+    install_apt_packages
+    install_uv
+    install_llama
+    install_vllm
+    install_forge
+    write_launchers
+    print_summary
+}
+
+# =========================================================== uninstall ===
+# Deletes only inside your home folder or the folder the stack was installed in.
+safe_rm() {
+    local p=$1 d
+    if [[ $p != *..* ]]; then
+        if [[ $p == "$HOME"/?* ]]; then rm -rf -- "$p"; return; fi
+        while read -r d; do
+            [[ ${#d} -gt 1 && ( $p == "$d" || $p == "$d"/?* ) ]] && { rm -rf -- "$p"; return; }
+        done < <(sed -n 's/^STACKDIR //p' "$LOG"; logged_stack_dir)
+    fi
+    warn "Refusing to delete $p (outside your home folder and the stack folder)"
+}
+
+do_uninstall() {
+    [[ -f $LOG ]] || { echo "No install log at $LOG - nothing to uninstall."; exit 0; }
+
+    local installed_at
+    installed_at=$(logged_stack_dir)
+    if [[ -n $installed_at && $installed_at != "$STACK_DIR" ]]; then
+        STACK_DIR=$installed_at
+        set_layout
+    fi
+    if pgrep -f -- "$STACK_DIR/backends" >/dev/null 2>&1; then
+        die "A backend is still running. Stop it (Ctrl+C in its terminal) and try again."
+    fi
+
+    local paths=() modeldirs=() parents=() pkgs=() p
+    mapfile -t paths     < <(sed -n 's/^PATH //p'     "$LOG" | tac)
+    mapfile -t modeldirs < <(sed -n 's/^MODELDIR //p' "$LOG")
+    mapfile -t parents   < <(sed -n 's/^PARENT //p'   "$LOG" | tac)
+    while read -r p; do
+        [[ -n $p ]] && is_installed "$p" && pkgs+=("$p")
+    done < <(sed -n 's/^APT //p' "$LOG")
+
+    echo "This will remove:"
+    for p in "${paths[@]}"; do echo "    $p"; done
+    echo "    ${#pkgs[@]} apt package(s) that this script installed"
+    echo "Model folders are only removed if they are empty; your model files are kept."
+    read -r -p "Proceed? [y/N] " answer
+    [[ $answer =~ ^[Yy]$ ]] || { echo "Cancelled."; exit 0; }
+
+    log "Removing installed files"
+    for p in "${paths[@]}"; do
+        [[ -e $p ]] && { info "$p"; safe_rm "$p"; }
+    done
+
+    local kept=()
+    for p in "${modeldirs[@]}"; do
+        [[ -d $p ]] || continue
+        rmdir "$p" 2>/dev/null || kept+=("$p")
+    done
+    for p in "${parents[@]}"; do
+        [[ -d $p ]] && rmdir "$p" 2>/dev/null || true
+    done
+
+    if (( ${#pkgs[@]} > 0 )); then
+        log "Removing apt packages"
+        # Mark them as automatically installed, then remove only those that
+        # nothing else on the system depends on.
+        sudo apt-mark auto "${pkgs[@]}" >/dev/null
+        local removable=() still_needed=()
+        mapfile -t removable < <(comm -12 \
+            <(printf '%s\n' "${pkgs[@]}" | sort -u) \
+            <(apt-get -s autoremove 2>/dev/null | awk '/^Remv /{sub(/:.*/,"",$2); print $2}' | sort -u))
+        if (( ${#removable[@]} > 0 )); then
+            sudo apt-get purge -y "${removable[@]}"
+        fi
+        mapfile -t still_needed < <(comm -23 \
+            <(printf '%s\n' "${pkgs[@]}" | sort -u) \
+            <(printf '%s\n' "${removable[@]}" | sort -u))
+        if (( ${#still_needed[@]} > 0 )) && [[ -n ${still_needed[0]} ]]; then
+            warn "Kept because other software now depends on them: ${still_needed[*]}"
+        fi
+    fi
+
+    local tmpdir_created=0
+    grep -q '^TMPDIR ' "$LOG" && tmpdir_created=1
+    rm -f -- "$LOG"
+    [[ $tmpdir_created == 1 ]] && rmdir "$LOG_DIR" 2>/dev/null || true
+
+    log "Uninstall complete"
+    if (( ${#kept[@]} > 0 )); then
+        warn "These model folders still contain files and were kept:"
+        for p in "${kept[@]}"; do info "$p"; done
+    fi
+}
+
+# ================================================================ main ===
+[[ $EUID -ne 0 ]] || die "Run this as your normal user, not root. It asks for sudo when needed."
+
+case "${1:-}" in
+    "")              do_install ;;
+    -u|--uninstall)  do_uninstall ;;
+    -h|--help)       usage ;;
+    *)               usage; exit 1 ;;
+esac
+EOF_AK_VIRTUAL_AI
+
+        chmod 755 "$tools_dir"/kernel-headers-setup.sh "$tools_dir"/gpu-npu-drivers.sh \
+                  "$tools_dir"/virtual-ai-drivers.sh
+    }
+
+    # Generates the driver tools, then runs one. Usage: run_tool <script name> [-u]
+    # The tools refuse to run as root (they call sudo themselves and keep their
+    # logs in the user's ~/.tmp), so under sudo they run as the invoking user.
+    run_tool() {
+        local name="$1" script; shift
+        autokernel_write_driver_tools || return 1
+        script="$(autokernel_driver_tools_dir)/$name"
+        if [[ ! -f "$script" ]]; then
+            echo "Error: unknown driver tool: $name"
+            return 1
+        fi
+        if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+            if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+                sudo -u "$SUDO_USER" -H env STACK_DIR="$(autokernel_ai_stack_dir)" bash "$script" "$@"
+            else
+                echo "Error: $name must run as a normal user (it asks for sudo itself)."
+                echo "Start AutoKernel from your user account and choose this option again."
+                return 1
+            fi
+        else
+            STACK_DIR="$(autokernel_ai_stack_dir)" bash "$script" "$@"
+        fi
+    }
+
+    # ------------------------------------------------------------------------
+    # Model launcher for option 31 (Test & Run Options).
+    # Usage: autokernel_start_model text|vision|image
+    # Checks the model folder first. If no model is there it prints
+    # "Missing File Detected" with the folder, file type and purpose.
+    # Otherwise it runs the backend in the foreground; Ctrl+C stops the backend
+    # and returns to the menu.
+    # ------------------------------------------------------------------------
+    autokernel_ai_stack_in_use() {
+        local d=""
+        if [[ -f "$(_autokernel_user_home)/.tmp/.installlog" ]]; then
+            d=$(sed -n 's/^STACKDIR //p' "$(_autokernel_user_home)/.tmp/.installlog" | tail -n1)
+        fi
+        printf '%s\n' "${d:-$(autokernel_ai_stack_dir)}"
+    }
+
+    # Opens a new terminal window running a command. Returns 1 if there is no
+    # graphical session or no supported terminal, so callers can fall back to
+    # running in the current window. Usage: autokernel_open_terminal cmd [args...]
+    autokernel_open_terminal() {
+        local cmd term c uid
+        [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]] || return 1
+        for c in x-terminal-emulator gnome-terminal mate-terminal xfce4-terminal konsole xterm; do
+            command -v "$c" >/dev/null 2>&1 && { term="$c"; break; }
+        done
+        [[ -n "${term:-}" ]] || return 1
+
+        printf -v cmd '%q ' "$@"
+        # Keep the window open after the program ends so its output stays readable.
+        cmd="$cmd; echo; echo '-------------------------'; echo 'Process finished. Press Enter to close.'; read -r _"
+
+        local launch=()
+        case "$term" in
+            gnome-terminal) launch=("$term" -- bash -c "$cmd") ;;
+            *)              launch=("$term" -e bash -c "$cmd") ;;
+        esac
+
+        if [[ ${EUID:-$(id -u)} -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+            # Open the window in the user's desktop session, as the user.
+            uid=$(id -u "$SUDO_USER")
+            sudo -u "$SUDO_USER" -H env \
+                DISPLAY="${DISPLAY:-}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
+                XAUTHORITY="${XAUTHORITY:-$(_autokernel_user_home)/.Xauthority}" \
+                XDG_RUNTIME_DIR="/run/user/$uid" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+                "${launch[@]}" >/dev/null 2>&1 &
+        else
+            "${launch[@]}" >/dev/null 2>&1 &
+        fi
+        sleep 1
+        # A terminal that failed immediately (no session access) has already exited.
+        if ! kill -0 $! 2>/dev/null && ! wait $!; then return 1; fi
+        echo "Opened a new $term window."
+        return 0
+    }
+
+    autokernel_start_model() {
+        local kind="$1" stack models launcher ext purpose backend port title
+        local found=() m pick i
+        stack="$(autokernel_ai_stack_in_use)"
+        case "$kind" in
+            text)
+                models="$stack/models/text"; launcher="$stack/bin/start-text.sh"
+                ext=".gguf  (a single file, e.g. my-model.Q4_K_M.gguf)"
+                purpose="Text input/output: the chat model that reads and writes text."
+                backend="llama.cpp"; port=8080; title="Text"
+                while IFS= read -r m; do found+=("$m"); done < <(
+                    find "$models" -maxdepth 1 -type f -iname '*.gguf' ! -iname '*mmproj*' 2>/dev/null | sort)
+                ;;
+            vision)
+                models="$stack/models/vision"; launcher="$stack/bin/start-vision.sh"
+                ext=".safetensors  (the WHOLE model folder: <model-name>/ containing the"
+                ext="$ext"$'\n'"                        .safetensors files plus config.json, the tokenizer files and"
+                ext="$ext"$'\n'"                        preprocessor_config.json)"
+                purpose="Image input: looks at an image and describes it in text."
+                backend="vLLM"; port=8000; title="Vision"
+                while IFS= read -r m; do
+                    compgen -G "$m/*.safetensors" >/dev/null && found+=("$m")
+                done < <(find "$models" -mindepth 2 -maxdepth 2 -name config.json -printf '%h\n' 2>/dev/null | sort)
+                ;;
+            image)
+                models="$stack/models/image"; launcher="$stack/bin/start-image.sh"
+                ext=".safetensors  (a single Stable Diffusion checkpoint, e.g. my-checkpoint.safetensors)"
+                purpose="Image output: generates images from a text prompt."
+                backend="Stable Diffusion WebUI Forge"; port=7860; title="Image"
+                while IFS= read -r m; do found+=("$m"); done < <(
+                    find "$models" -maxdepth 1 -type f -iname '*.safetensors' 2>/dev/null | sort)
+                ;;
+            *) echo "Unknown model type: $kind"; return 1 ;;
+        esac
+
+        echo "======================================================================="
+        echo "  Start $title Model  ($backend, http://127.0.0.1:$port)"
+        echo "======================================================================="
+        if (( ${#found[@]} == 0 )); then
+            echo "Missing File Detected"
+            echo "  Place the model here: $models/"
+            echo "  File type:            $ext"
+            echo "  Expected function:    $purpose"
+            [[ -d $models ]] || echo "  (That folder doesn't exist yet: install the virtual AI drivers with option 23, Tier 6.)"
+            return 1
+        fi
+        if [[ ! -x $launcher ]]; then
+            echo "Model found, but the $backend backend isn't installed yet."
+            echo "Install it with option 23, Tier 6 (virtual AI drivers)."
+            return 1
+        fi
+
+        pick="${found[0]}"
+        if (( ${#found[@]} > 1 )); then
+            echo "Models found:"
+            for i in "${!found[@]}"; do echo "  $((i + 1))) $(basename "${found[$i]}")"; done
+            read -p "Choice (1-${#found[@]}, default 1): " i
+            if [[ $i =~ ^[0-9]+$ ]] && (( i >= 1 && i <= ${#found[@]} )); then pick="${found[$((i - 1))]}"; fi
+        fi
+        local where
+        echo ""
+        echo "Run $(basename "$pick"):"
+        echo "  1) In a new terminal window (AutoKernel stays usable here)"
+        echo "  2) In this window (Ctrl+C stops it and returns to the menu)"
+        read -p "Choice (1-2, default 1): " where
+        if [[ "$where" != "2" ]]; then
+            # Under sudo, autokernel_open_terminal opens the window as the user.
+            if autokernel_open_terminal bash "$launcher" "$pick"; then
+                echo "$backend is starting there: http://127.0.0.1:$port"
+                echo "Close that window (or press Ctrl+C in it) to stop $backend."
+                return 0
+            fi
+            echo "Couldn't open a new terminal window (no desktop session or terminal found)."
+            echo "Running it in this window instead."
+        fi
+        echo "Starting $(basename "$pick")"
+        echo "Press Ctrl+C to stop it and return to the menu."
+        echo ""
+
+        # Ctrl+C should stop only the backend, not AutoKernel.
+        trap ':' INT
+        if [[ ${EUID:-$(id -u)} -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+            sudo -u "$SUDO_USER" -H bash "$launcher" "$pick"
+        else
+            bash "$launcher" "$pick"
+        fi
+        trap - INT
+        echo ""
+        echo "$backend stopped."
     }
 
     # ------------------------------------------------------------------------
@@ -907,7 +3020,7 @@ show_menu() {
     echo "|21) Distro Setup Utility         22) Search For and select Driver 23) Install Driver                |"
     echo "|24) Uninstall driver             25) Reboot Computer              26) reveal error messagee         |"
     echo "|27) Enter a Chroot               28) Clone partition to/from .img 29) Unmount Full Chroot(?er?cmn)  |"
-    echo "|30) OS Theme / Appearance        31) OS Screensaver / Test        32) (Re)Install / Repair AutoKernel|"      
+    echo "|30) OS Theme / Appearance        31) Test & Run Options           32) (Re)Install / Repair AutoKernel|"      
     echo "|================================ Application / Developer Level Divide ==============================|"
     echo "|33) Set up git and reconfigure   34) Make/Clone new git project   35) Manage/Edit/etc. Git Project  |"
     echo "|36) Compile/Run/Test Project     37) Custom GUI / Game Engine     38) Update AutoKernel             |"
@@ -37059,16 +39172,22 @@ EOF
         echo "1) Tier 1 (Mint OS): Scan for recommended proprietary drivers (GPU/Wi-Fi)"
         echo "2) Tier 2 (Hardware): Deep scan of PCI and USB buses for unbound devices"
         echo "3) Tier 3 (Kernel):   List currently active kernel modules loaded in RAM"
+        echo "4) Tier 4 (Status):   GPU/NPU drivers, custom kernels & virtual AI drivers"
         echo ""
-        read -p "Choice (1-3): " drv_depth
-        
+        read -p "Choice (1-4): " drv_depth
+
         case "$drv_depth" in
             1)
                 if command -v ubuntu-drivers &> /dev/null; then
                     echo "Scanning OS repositories..."
                     ubuntu-drivers devices
+                elif command -v nvidia-detect &> /dev/null; then
+                    # LMDE is Debian-based and has no ubuntu-drivers.
+                    echo "Scanning with Debian's nvidia-detect..."
+                    nvidia-detect
                 else
-                    echo "Error: ubuntu-drivers utility not found. Install 'ubuntu-drivers-common'."
+                    echo "Error: no driver scanner found. Install 'ubuntu-drivers-common' (Mint)"
+                    echo "or 'nvidia-detect' (LMDE/Debian)."
                 fi
                 ;;
             2)
@@ -37087,6 +39206,60 @@ EOF
                     modinfo "$mod_name"
                 fi
                 ;;
+            4)
+                echo "--- GPUs and NPUs ---"
+                lspci -nn | grep -E '\[(0300|0302|0380|1200)\]' || echo "None found"
+                lspci -nn -d 1022:1502 2>/dev/null; lspci -nn -d 1022:17f0 2>/dev/null
+                if command -v nvidia-smi &> /dev/null; then
+                    echo ""
+                    nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null \
+                        || echo "nvidia-smi is installed, but the NVIDIA driver isn't loaded (reboot needed?)"
+                fi
+
+                echo ""
+                echo "--- Kernels: compiler used vs. driver build compiler ---"
+                echo "Running: $(uname -r)    System: $(gcc --version 2>/dev/null | head -n1)"
+                for kdir in /lib/modules/*/; do
+                    kver=$(basename "$kdir")
+                    [[ -d $kdir/kernel ]] || continue
+                    kcfg="$kdir/build/.config"
+                    if [[ -f $kcfg ]]; then
+                        kcc=$(sed -n 's/^CONFIG_CC_VERSION_TEXT="\(.*\)"/\1/p' "$kcfg")
+                        pinned=$(sed -n 's/^override CC := //p' "$kdir/build/Makefile" 2>/dev/null | head -n1)
+                        echo "  $kver"
+                        echo "      built with : $kcc"
+                        [[ -n $pinned ]] && echo "      drivers use: $pinned (set by kernel-headers-setup.sh)"
+                    else
+                        echo "  $kver: headers MISSING (drivers can't be built for it)"
+                    fi
+                done
+
+                if command -v dkms &> /dev/null; then
+                    echo ""
+                    echo "--- DKMS driver builds ---"
+                    dkms status 2>/dev/null || true
+                fi
+
+                echo ""
+                echo "--- Virtual AI drivers (llama.cpp / vLLM / Forge) ---"
+                if [[ -f ~/.tmp/.installlog ]]; then
+                    stack_at=$(sed -n 's/^STACKDIR //p' ~/.tmp/.installlog | tail -n1)
+                    [[ -n $stack_at ]] || stack_at=$(sed -n 's/^PARENT //p' ~/.tmp/.installlog | head -n1)
+                    echo "  location: ${stack_at:-unknown}"
+                    for part in llama vllm forge; do
+                        state=$(awk -v c="$part" '$1=="DONE" && $2==c {s=$3} END {print s}' ~/.tmp/.installlog)
+                        printf '  %-6s %s\n' "$part" "${state:-not installed}"
+                    done
+                else
+                    echo "  Not installed"
+                fi
+
+                echo ""
+                echo "--- Setup logs ---"
+                for lg in .kernelclog .driverlog .installlog; do
+                    if [[ -f ~/.tmp/$lg ]]; then echo "  ~/.tmp/$lg  (present)"; else echo "  ~/.tmp/$lg  (none)"; fi
+                done
+                ;;
             *)
                 echo "Invalid tier selected."
                 ;;
@@ -37103,23 +39276,33 @@ EOF
         echo "1) Tier 1 (Mint OS): Auto-install all recommended OS proprietary drivers"
         echo "2) Tier 2 (Package): Install a specific driver package via APT"
         echo "3) Tier 3 (Kernel):  Insert a custom .ko module or load a system module"
+        echo "4) Tier 4 (Kernel):  Prepare custom kernels for driver builds (headers + compiler)"
+        echo "5) Tier 5 (Hardware): Detect and install GPU / NPU drivers"
+        echo "6) Tier 6 (AI):      Install virtual AI drivers (text, image input, image output)"
+        echo "7) Full stack:       Tiers 4 -> 5 -> 6 in order"
+        echo "   (Uninstall these with option 24.)"
         echo ""
-        read -p "Choice (1-3): " inst_depth
-        
+        read -p "Choice (1-7): " inst_depth
+
         case "$inst_depth" in
             1)
-                echo "Executing auto-install..."
-                sudo ubuntu-drivers autoinstall
+                if command -v ubuntu-drivers &> /dev/null; then
+                    echo "Executing auto-install..."
+                    sudo ubuntu-drivers autoinstall
+                else
+                    echo "ubuntu-drivers isn't available on this system (LMDE/Debian)."
+                    echo "Use Tier 5, which detects your hardware and installs the right drivers."
+                fi
                 ;;
             2)
-                read -p "Enter exact APT package name (e.g., nvidia-driver-535): " apt_pkg
+                read -p "Enter exact APT package name (e.g., nvidia-driver): " apt_pkg
                 sudo apt-get install "$apt_pkg" -y
                 ;;
             3)
                 echo "A) Load integrated system module (modprobe)"
                 echo "B) Insert custom compiled module (insmod)"
                 read -p "Choice (A/B): " mod_choice
-                
+
                 if [[ "$mod_choice" == "A" || "$mod_choice" == "a" ]]; then
                     read -p "Module name: " sys_mod
                     sudo modprobe "$sys_mod"
@@ -37131,6 +39314,26 @@ EOF
                 else
                     echo "Invalid choice."
                 fi
+                ;;
+            4|5|6)
+                case "$inst_depth" in
+                    4) tool="kernel-headers-setup.sh" ;;
+                    5) tool="gpu-npu-drivers.sh" ;;
+                    6) tool="virtual-ai-drivers.sh" ;;
+                esac
+                run_tool "$tool" || echo "[!] $tool reported a problem (see above)."
+                ;;
+            7)
+                for tool in kernel-headers-setup.sh gpu-npu-drivers.sh virtual-ai-drivers.sh; do
+                    echo ""; echo "######## Running: $tool"
+                    if ! run_tool "$tool"; then
+                        read -p "$tool reported a problem. Continue with the next step? [y/N] " cont
+                        [[ $cont =~ ^[Yy]$ ]] || break
+                    fi
+                done
+                echo ""
+                echo "If new GPU drivers were installed: reboot, then run Tier 6 again so the"
+                echo "AI backends are rebuilt with GPU support."
                 ;;
             *)
                 echo "Invalid tier selected."
@@ -37147,8 +39350,12 @@ EOF
         echo "Select depth tier:"
         echo "1) Tier 1/2 (Package): Purge a driver package via APT"
         echo "2) Tier 3 (Kernel):    Unload an active kernel module from RAM (rmmod)"
+        echo "3) Tier 4 (Kernel):    Undo custom-kernel driver-build setup (headers + compiler)"
+        echo "4) Tier 5 (Hardware):  Uninstall the GPU / NPU drivers installed by option 23"
+        echo "5) Tier 6 (AI):        Uninstall the virtual AI drivers (your model files are kept)"
+        echo "6) Full stack:         Tiers 6 -> 5 -> 4 (reverse of the install order)"
         echo ""
-        read -p "Choice (1-2): " uninst_depth
+        read -p "Choice (1-6): " uninst_depth
         
         case "$uninst_depth" in
             1)
@@ -37159,6 +39366,22 @@ EOF
             2)
                 read -p "Enter active module name to unload (without .ko): " rm_mod
                 sudo rmmod "$rm_mod"
+                ;;
+            3|4|5)
+                case "$uninst_depth" in
+                    3) tool="kernel-headers-setup.sh" ;;
+                    4) tool="gpu-npu-drivers.sh" ;;
+                    5) tool="virtual-ai-drivers.sh" ;;
+                esac
+                run_tool "$tool" -u || echo "[!] $tool reported a problem (see above)."
+                ;;
+            6)
+                # Reverse order: the AI backends depend on the drivers, and the
+                # drivers depend on the kernel setup.
+                for tool in virtual-ai-drivers.sh gpu-npu-drivers.sh kernel-headers-setup.sh; do
+                    echo ""; echo "######## Uninstalling: $tool"
+                    run_tool "$tool" -u || echo "[!] $tool reported a problem (see above)."
+                done
                 ;;
             *)
                 echo "Invalid tier selected."
@@ -37317,53 +39540,75 @@ EOF
         ;;
 
     31)
-        # ------------------------------------------------------------------
-        # Cross-OS screen saver test/activation.
-        # ------------------------------------------------------------------
-        case "$TARGET_OS" in
-            linux)
-                if command -v cinnamon-screensaver-command >/dev/null 2>&1; then
-                    cinnamon-screensaver-command -a
-                elif command -v gnome-screensaver-command >/dev/null 2>&1; then
-                    gnome-screensaver-command -a
-                elif command -v xdg-screensaver >/dev/null 2>&1; then
-                    xdg-screensaver activate
-                elif command -v loginctl >/dev/null 2>&1; then
-                    echo "No screen-saver command found; using session lock as a fallback."
-                    loginctl lock-session
-                else
-                    echo "No supported Linux screen-saver or lock command was detected."
-                fi
-                ;;
+        clear
+        echo "======================================================================="
+        echo "                         Test & Run Options                            "
+        echo "======================================================================="
+        echo "1) OS Screensaver / Test"
+        echo "2) Start Vision Model   (image input,  vLLM,  models/vision/<model-name>/)"
+        echo "3) Start Text Model     (text in/out,  llama.cpp, models/text/*.gguf)"
+        echo "4) Start Image Model    (image output, Forge, models/image/*.safetensors)"
+        echo ""
+        echo "AI models are read from: $(autokernel_ai_stack_in_use)/models"
+        echo ""
+        read -p "Choice (1-4): " test_run_choice
 
-            unix)
-                if command -v open >/dev/null 2>&1; then
-                    if ! open -a ScreenSaverEngine 2>/dev/null; then
-                        echo "ScreenSaverEngine was not available; locking the macOS session instead."
-                        /System/Library/CoreServices/Menu\ Extras/User.menu/Contents/Resources/CGSession -suspend 2>/dev/null || true
-                    fi
-                else
-                    echo "macOS 'open' command was not found."
-                fi
-                ;;
+        case "$test_run_choice" in
+            1)
+                # ------------------------------------------------------------------
+                # Cross-OS screen saver test/activation.
+                # ------------------------------------------------------------------
+                case "$TARGET_OS" in
+                    linux)
+                        if command -v cinnamon-screensaver-command >/dev/null 2>&1; then
+                            cinnamon-screensaver-command -a
+                        elif command -v gnome-screensaver-command >/dev/null 2>&1; then
+                            gnome-screensaver-command -a
+                        elif command -v xdg-screensaver >/dev/null 2>&1; then
+                            xdg-screensaver activate
+                        elif command -v loginctl >/dev/null 2>&1; then
+                            echo "No screen-saver command found; using session lock as a fallback."
+                            loginctl lock-session
+                        else
+                            echo "No supported Linux screen-saver or lock command was detected."
+                        fi
+                        ;;
 
-            windows)
-                if command -v powershell.exe >/dev/null 2>&1; then
-                    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+                    unix)
+                        if command -v open >/dev/null 2>&1; then
+                            if ! open -a ScreenSaverEngine 2>/dev/null; then
+                                echo "ScreenSaverEngine was not available; locking the macOS session instead."
+                                /System/Library/CoreServices/Menu\ Extras/User.menu/Contents/Resources/CGSession -suspend 2>/dev/null || true
+                            fi
+                        else
+                            echo "macOS 'open' command was not found."
+                        fi
+                        ;;
+
+                    windows)
+                        if command -v powershell.exe >/dev/null 2>&1; then
+                            powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
 '$s=Join-Path $env:WINDIR "System32\scrnsave.scr"; if(Test-Path $s){Start-Process $s -ArgumentList "/s"}else{rundll32.exe user32.dll,LockWorkStation}'
-                elif command -v rundll32.exe >/dev/null 2>&1; then
-                    rundll32.exe user32.dll,LockWorkStation
-                else
-                    echo "No supported Windows screen-saver or lock command was detected."
-                fi
-                ;;
+                        elif command -v rundll32.exe >/dev/null 2>&1; then
+                            rundll32.exe user32.dll,LockWorkStation
+                        else
+                            echo "No supported Windows screen-saver or lock command was detected."
+                        fi
+                        ;;
 
-            *)
-                echo "Unsupported TARGET_OS for screen saver: $TARGET_OS"
+                    *)
+                        echo "Unsupported TARGET_OS for screen saver: $TARGET_OS"
+                        ;;
+                esac
+
+                echo "It's option OS Screensaver / Test."
                 ;;
+            2) autokernel_start_model vision ;;
+            3) autokernel_start_model text ;;
+            4) autokernel_start_model image ;;
+            *) echo "Invalid choice." ;;
         esac
-
-        echo "It's option OS Screensaver / Test."
+        echo ""
         read -p "Press enter to continue and return to main menu..." screensaver
         ;;
 
