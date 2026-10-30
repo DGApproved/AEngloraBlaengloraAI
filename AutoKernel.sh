@@ -128,6 +128,73 @@
 #   SUDO_USER in the user's desktop session under sudo; kept open after exit)
 #   or in the current window, falling back to the current window when no
 #   desktop session or terminal is available.
+#   [SELF-UNINSTALL] Added 'AutoKernel -u': moves AutoKernel itself and every
+#   file and folder it created in its directory into a new
+#   Trash(DeleteMe)/<timestamp>/ folder there (nothing is deleted), together
+#   with its desktop launcher if that points into the folder, and writes a
+#   README with restore notes. Ownership is decided by ~/.tmp/.autokernel-baseline
+#   (per-folder blocks), written on AutoKernel's first boot in a workspace and
+#   listing what was already there; those entries stay in place unless the user
+#   chooses to move them as well. ~/.tmp/.autokernel-trashlist records what -u
+#   would move and is refreshed at boot and every time the main menu is shown.
+#   On -u, copies of both lists go into the trash folder and the folder's
+#   blocks are retired. A baseline left inside the folder by the first version
+#   of this feature is migrated to ~/.tmp. System-wide changes (drivers, kernel
+#   headers) are not undone by -u; option 24 handles those.
+#   [SELF-UNINSTALL][TRACKING] Added a third list, ~/.tmp/.autokernel-created:
+#   every top-level entry that appears in the folder while AutoKernel runs
+#   (session snapshot at boot, compared at each main menu and on exit). -u now
+#   moves AutoKernel itself, its known files and the created-list entries;
+#   baseline entries always stay; anything in neither list (e.g. files added
+#   while AutoKernel wasn't running) is shown separately and moved only on
+#   request. Folders tracked before this list existed carry their baseline-diff
+#   attribution into it. Added 'AutoKernel -s', which reports the size of
+#   everything -u would move (per entry and total) without moving anything.
+#   [DRIVERS][TRASH IMPORT] run_tool passes AK_TRASH_DIR so option 23 tier 6
+#   (virtual AI drivers) can find a stack that -u moved to
+#   Trash(DeleteMe)/<date>/ai-stack and import what the new stack lacks:
+#   backends (llama.cpp, vLLM, Forge), tools, caches and models (never
+#   overwriting models already present), by move or copy. Imported to the same
+#   path, everything is reused as-is; imported elsewhere, only the Python
+#   environments are rebuilt. The tool also reconciles its log with what is on
+#   disk, so components that were trashed are reinstalled instead of skipped.
+#   It also tests that the vLLM and Forge Python environments actually run
+#   (interpreter starts, package imports) rather than only that their files
+#   exist; a broken environment (e.g. moved, or its Python missing) is rebuilt,
+#   and start-vision.sh explains the fix instead of failing with "cannot
+#   execute: required file not found".
+#   [MENU 31] Start Vision Model checks the chosen folder's config.json and
+#   reports "Wrong Model Type Detected" for image encoders / classifiers (CLIP,
+#   SigLIP, timm backbones), which vLLM cannot use to describe images, before
+#   offering to try anyway.
+#   [MENU 31] Added "5) Add New Model", also offered whenever "Missing File
+#   Detected" is shown. Adapted from orchestrator.sh's add_model_to_aidev (url=
+#   prompt, drag-and-drop quote stripping, .part downloads, local import without
+#   overwriting) and extended per model kind: Hugging Face links (repo, tree,
+#   blob or resolve) are resolved through the Hugging Face API file list, so a
+#   split GGUF gets every part and a vision model gets its whole folder (weights,
+#   config, tokenizer, preprocessor and chat-template files, skipping formats
+#   vLLM doesn't use); image checkpoints must be single-file. Other URLs download
+#   the file (server-named for links like civitai's), and for vision models the
+#   same web folder is probed for companion files and each still-missing
+#   required file is asked for by URL. Gated repositories prompt for an access
+#   token, which is kept only for the session.
+#   [MENU 31][TERMINALS] Fixed model windows not opening when AutoKernel runs
+#   under sudo: sudo strips DISPLAY/XAUTHORITY/DBUS, so autokernel_gui_env now
+#   recovers them from the user's own desktop processes and the terminal is
+#   opened as that user. gnome-terminal (LMDE's default) is preferred, failures
+#   report the terminal's own error instead of passing silently, and a refused
+#   window falls back to a tab. Run choices are now: new window, new tab,
+#   background with no window (setsid/nohup, log in ai-stack/logs, PID in
+#   ai-stack/run), or this window. Added "6) Background Models" to list running
+#   models, show their logs and stop them.
+#   [SELF-RESTORE] Added 'AutoKernel -r': run on a copy inside
+#   Trash(DeleteMe)/<date>/, it copies itself back to the folder above
+#   Trash(DeleteMe) (asking before replacing a different version; the trash copy
+#   stays as a backup), offers its desktop launcher back from _outside/, and
+#   then starts the restored copy or prints the command to start it. Run
+#   anywhere else, it lists the restorable copies in that folder's trash. -u
+#   now ends by printing the exact -r command. Added -h listing the options.
 #
 # AutoKernel(29)-ChatGPT
 #   [GODDESSMATRIX][V14.44] Restored EXEC as the ordinary host/system command
@@ -438,6 +505,12 @@ OS_Selector() {
     # AutoKernel's other folders, instead of the tool's standalone ~/ai-stack.
     autokernel_ai_stack_dir() {
         printf '%s\n' "${AK_AI_STACK_DIR:-${AUTOKERNEL_WORKSPACE:-$AUTOKERNEL_DIR}/ai-stack}"
+    }
+
+    # Where 'AutoKernel -u' puts things; the virtual AI drivers look there for a
+    # previous stack to import backends and models from.
+    autokernel_trash_dir() {
+        printf '%s\n' "${AUTOKERNEL_WORKSPACE:-$AUTOKERNEL_DIR}/${AUTOKERNEL_TRASH_NAME:-Trash(DeleteMe)}"
     }
 
     autokernel_driver_tools_dir() {
@@ -1821,6 +1894,11 @@ set -euo pipefail
 STACK_DIR="${STACK_DIR:-$HOME/ai-stack}"
 STACK_DIR="${STACK_DIR%/}"
 
+# AutoKernel's Trash(DeleteMe) folder (set by AutoKernel). After 'AutoKernel -u'
+# the previous stack sits in Trash(DeleteMe)/<date>/ai-stack, and an install can
+# bring its backends and models back instead of downloading them again.
+TRASH_DIR="${AK_TRASH_DIR:-}"
+
 set_layout() {
     TEXT_MODELS="$STACK_DIR/models/text"      # your .gguf goes here
     VISION_MODELS="$STACK_DIR/models/vision"  # your vision model folder goes here
@@ -1951,6 +2029,10 @@ install_apt_packages() {
 install_uv() {
     log "uv (private Python versions for vLLM and Forge)"
     track_dir PATH "$TOOLS_DIR" "$CACHE_DIR"
+    if [[ -x $UV ]] && ! "$UV" --version >/dev/null 2>&1; then
+        warn "uv is broken; reinstalling it"
+        rm -rf -- "$TOOLS_DIR/uv-venv"
+    fi
     if [[ -x $UV ]]; then
         info "Already installed"
         return
@@ -2085,6 +2167,10 @@ EOF
 if [[ ! -x "$VLLM_DIR/venv/bin/vllm" ]]; then
     echo "vLLM is not installed yet. Install the NVIDIA driver, then re-run virtual-ai-drivers.sh."; exit 1
 fi
+if ! "$VLLM_DIR/venv/bin/python" -c 'import vllm' >/dev/null 2>&1; then
+    echo "vLLM's Python environment is broken (it was moved, or its Python is missing)."
+    echo "Re-run virtual-ai-drivers.sh (AutoKernel option 23, Tier 6) to repair it."; exit 1
+fi
 $cache_env VLLM_CACHE_ROOT="$CACHE_DIR/vllm" TRITON_CACHE_DIR="$CACHE_DIR/triton"
 MODEL="\${1:-\$(find "$VISION_MODELS" -mindepth 2 -maxdepth 2 -name config.json -printf '%h\n' | sort | head -n1)}"
 if [[ -z "\$MODEL" ]]; then echo "No model folder (with config.json) found in $VISION_MODELS"; exit 1; fi
@@ -2202,9 +2288,150 @@ resolve_stack_dir() {
     echo "STACKDIR $STACK_DIR" >> "$LOG"
 }
 
+# --------------------------------------------------- import from trash ---
+# Size of a path, for display.
+size_of() { du -sh -- "$1" 2>/dev/null | cut -f1; }
+
+# The pieces of a stack that can be brought back, relative to the stack root.
+# Models are listed one by one so models already in place are never overwritten.
+importable_items() {
+    local src=$1 d m
+    for d in backends/llama.cpp backends/vllm backends/forge tools cache; do
+        [[ -e $src/$d ]] && printf '%s\n' "$d"
+    done
+    for d in models/text models/vision models/image; do
+        for m in "$src/$d"/* "$src/$d"/.[!.]*; do
+            [[ -e $m ]] && printf '%s\n' "$d/${m##*/}"
+        done
+    done
+}
+
+import_from_trash() {
+    [[ -n $TRASH_DIR && -d $TRASH_DIR ]] || return 0
+    local cands=() c i pick answer item plan=() orig mode src
+
+    # Newest first: the trash subfolders are named by date and time.
+    while IFS= read -r c; do
+        [[ -n $(importable_items "$c") ]] && cands+=("$c")
+    done < <(find "$TRASH_DIR" -mindepth 2 -maxdepth 2 -type d -name ai-stack 2>/dev/null | sort -r)
+    (( ${#cands[@]} )) || return 0
+
+    log "Previous AI stack found in $(basename "$TRASH_DIR")"
+    for i in "${!cands[@]}"; do
+        c=${cands[$i]}
+        info "$((i + 1))) $(basename "$(dirname "$c")")   ($(size_of "$c"))"
+        for item in backends/llama.cpp backends/vllm backends/forge; do
+            [[ -e $c/$item ]] && info "      ${item#backends/}: $(size_of "$c/$item")"
+        done
+        local n
+        n=$(importable_items "$c" | grep -c '^models/' || true)
+        info "      models: $n"
+    done
+    read -r -p "    Import from which one? [1-${#cands[@]}, default 1, n = none] " answer || true
+    [[ $answer =~ ^[Nn] ]] && { info "Not importing"; return 0; }
+    pick=1
+    if [[ $answer =~ ^[0-9]+$ ]] && (( answer >= 1 && answer <= ${#cands[@]} )); then pick=$answer; fi
+    src=${cands[$((pick - 1))]}
+
+    # Only bring back what the current stack doesn't already have.
+    while IFS= read -r item; do
+        [[ -e $STACK_DIR/$item ]] || plan+=("$item")
+    done < <(importable_items "$src")
+    if (( ${#plan[@]} == 0 )); then
+        info "The current stack already has everything that's in that copy."
+        return 0
+    fi
+    info "Can import (not present in $STACK_DIR yet):"
+    for item in "${plan[@]}"; do info "    $item  ($(size_of "$src/$item"))"; done
+    info "  m) Move them out of the trash (instant, same drive)"
+    info "  c) Copy them (keeps the trash copy intact, uses extra space)"
+    info "  n) Don't import"
+    read -r -p "    Choice [M/c/n]: " mode || true
+    [[ $mode =~ ^[Nn] ]] && { info "Not importing"; return 0; }
+
+    for item in "${plan[@]}"; do
+        mkdir -p "$STACK_DIR/$(dirname "$item")"
+        if [[ $mode =~ ^[Cc] ]]; then
+            cp -a -- "$src/$item" "$STACK_DIR/$item"
+        else
+            mv -- "$src/$item" "$STACK_DIR/$item"
+        fi
+        info "Imported $item"
+    done
+
+    # Python environments only work at the path they were created at. The trash
+    # README names the folder the stack was moved out of; if that wasn't this
+    # stack's location, rebuild the environments (the rest is reused).
+    orig=$(sed -n "s/^Moved by 'AutoKernel -u' on .* from: //p" "$(dirname "$src")/README.txt" 2>/dev/null | head -n1)
+    if [[ -z $orig || "$orig/ai-stack" != "$STACK_DIR" ]]; then
+        info "Imported to a different location than it came from: Python environments will be rebuilt."
+        rm -rf -- "$VLLM_DIR/venv" "$FORGE_DIR/venv" "$TOOLS_DIR/uv-venv"
+    fi
+}
+
+# Makes the log match what is actually on disk: components whose files are
+# gone (e.g. moved to the trash) are marked not installed, and components that
+# are present but unlogged (e.g. just imported) are adopted.
+# A Python environment is usable only if its interpreter actually runs and the
+# package is importable. A moved or half-copied environment still has its files
+# (so "-x" passes) but its interpreter path points somewhere that no longer exists.
+venv_ok() {
+    local venv=$1 pkg=$2
+    "$venv/bin/python" -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('$pkg') is None)" \
+        >/dev/null 2>&1
+}
+
+reconcile_states() {
+    local state
+    # llama.cpp
+    state=$(get_state llama)
+    if [[ -x $LLAMA_DIR/build/bin/llama-server ]]; then
+        if [[ -z $state ]]; then
+            if grep -q '^GGML_CUDA:BOOL=ON' "$LLAMA_DIR/build/CMakeCache.txt" 2>/dev/null; then state=cuda; else state=cpu; fi
+            record "PATH $LLAMA_DIR"; set_state llama "$state"
+            info "Reusing llama.cpp ($state build)"
+        fi
+    elif [[ -n $state ]]; then
+        sed -i '/^DONE llama /d' "$LOG"
+    fi
+    # vLLM
+    state=$(get_state vllm)
+    if [[ -e $VLLM_DIR/venv ]] && ! venv_ok "$VLLM_DIR/venv" vllm; then
+        warn "vLLM's Python environment is broken (moved, or its Python is missing); rebuilding it"
+        rm -rf -- "$VLLM_DIR/venv"
+    fi
+    if [[ -x $VLLM_DIR/venv/bin/vllm ]]; then
+        if [[ -z $state ]]; then record "PATH $VLLM_DIR"; set_state vllm cuda; info "Reusing vLLM"; fi
+    elif [[ -n $state ]]; then
+        sed -i '/^DONE vllm /d' "$LOG"
+    fi
+    # Forge
+    state=$(get_state forge)
+    if [[ -e $FORGE_DIR/venv ]] && ! venv_ok "$FORGE_DIR/venv" torch; then
+        warn "Forge's Python environment is broken (moved, or its Python is missing); rebuilding it"
+        rm -rf -- "$FORGE_DIR/venv"
+    fi
+    if [[ -d $FORGE_DIR/.git && -x $FORGE_DIR/venv/bin/python ]]; then
+        if [[ -z $state ]]; then
+            if grep -q -- '--always-cpu' "$FORGE_DIR/webui-user.sh" 2>/dev/null; then state=cpu; else state=nvidia; fi
+            record "PATH $FORGE_DIR"; set_state forge "$state"
+            info "Reusing Forge ($state mode)"
+        fi
+    elif [[ -n $state ]]; then
+        sed -i '/^DONE forge /d' "$LOG"
+        # A Forge source checkout without its environment is finished by install_forge.
+        [[ -d $FORGE_DIR/.git ]] && record "PATH $FORGE_DIR"
+    fi
+    [[ -d $TOOLS_DIR ]] && record "PATH $TOOLS_DIR"
+    [[ -d $CACHE_DIR ]] && record "PATH $CACHE_DIR"
+    return 0
+}
+
 do_install() {
     init_log
     resolve_stack_dir
+    import_from_trash
+    reconcile_states
     detect_gpu
     log "Detected GPU: $GPU"
 
@@ -2337,14 +2564,16 @@ EOF_AK_VIRTUAL_AI
         fi
         if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
             if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
-                sudo -u "$SUDO_USER" -H env STACK_DIR="$(autokernel_ai_stack_dir)" bash "$script" "$@"
+                sudo -u "$SUDO_USER" -H env STACK_DIR="$(autokernel_ai_stack_dir)" \
+                    AK_TRASH_DIR="$(autokernel_trash_dir)" bash "$script" "$@"
             else
                 echo "Error: $name must run as a normal user (it asks for sudo itself)."
                 echo "Start AutoKernel from your user account and choose this option again."
                 return 1
             fi
         else
-            STACK_DIR="$(autokernel_ai_stack_dir)" bash "$script" "$@"
+            STACK_DIR="$(autokernel_ai_stack_dir)" AK_TRASH_DIR="$(autokernel_trash_dir)" \
+                bash "$script" "$@"
         fi
     }
 
@@ -2364,44 +2593,533 @@ EOF_AK_VIRTUAL_AI
         printf '%s\n' "${d:-$(autokernel_ai_stack_dir)}"
     }
 
-    # Opens a new terminal window running a command. Returns 1 if there is no
-    # graphical session or no supported terminal, so callers can fall back to
-    # running in the current window. Usage: autokernel_open_terminal cmd [args...]
+    # True when AutoKernel runs as root through sudo for a desktop user.
+    autokernel_via_sudo() { [[ ${EUID:-$(id -u)} -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; }
+
+    # Fills AK_GUI_ENV with what a program needs to open windows on the user's
+    # desktop. sudo strips DISPLAY and friends, so when they are missing they
+    # are read from one of the user's own running desktop processes.
+    autokernel_gui_env() {
+        local user uid pid var val
+        AK_GUI_ENV=()
+        if autokernel_via_sudo; then user="$SUDO_USER"; else user="$(id -un)"; fi
+        uid="$(id -u "$user")"
+        for var in DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR; do
+            val="${!var:-}"
+            if [[ -z "$val" ]]; then
+                # Desktop session processes first; they always carry these.
+                for pid in $(pgrep -u "$uid" -x 'cinnamon|cinnamon-session|cinnamon-sessio|gnome-session-b|gnome-shell|mate-session|xfce4-session|plasmashell|ksmserver' 2>/dev/null) \
+                           $(pgrep -u "$uid" 2>/dev/null); do
+                    val="$(tr '\0' '\n' 2>/dev/null < "/proc/$pid/environ" | sed -n "s/^$var=//p" | head -n1)"
+                    [[ -n "$val" ]] && break
+                done
+            fi
+            [[ -n "$val" ]] && AK_GUI_ENV+=("$var=$val")
+        done
+        [[ " ${AK_GUI_ENV[*]} " == *" XDG_RUNTIME_DIR="* ]] || AK_GUI_ENV+=("XDG_RUNTIME_DIR=/run/user/$uid")
+        [[ " ${AK_GUI_ENV[*]} " == *" DBUS_SESSION_BUS_ADDRESS="* ]] || AK_GUI_ENV+=("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus")
+        [[ " ${AK_GUI_ENV[*]} " == *" DISPLAY="* || " ${AK_GUI_ENV[*]} " == *" WAYLAND_DISPLAY="* ]]
+    }
+
+    # Runs a command as the desktop user (as-is when not under sudo).
+    autokernel_as_user() {
+        if autokernel_via_sudo; then sudo -u "$SUDO_USER" -H env "$@"; else env "$@"; fi
+    }
+
+    # Opens a command in a new terminal WINDOW or a new TAB of the user's
+    # terminal. Usage: autokernel_open_terminal window|tab cmd [args...]
+    # On failure sets AK_TERM_ERROR and returns 1, so callers can fall back.
     autokernel_open_terminal() {
-        local cmd term c uid
-        [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]] || return 1
-        for c in x-terminal-emulator gnome-terminal mate-terminal xfce4-terminal konsole xterm; do
+        local how="$1"; shift
+        local cmd term="" c errf rc pid
+        AK_TERM_ERROR=""
+        autokernel_gui_env || { AK_TERM_ERROR="no desktop session found (no DISPLAY)"; return 1; }
+
+        # gnome-terminal first: it is LMDE/Cinnamon's default and supports tabs.
+        for c in gnome-terminal mate-terminal xfce4-terminal konsole x-terminal-emulator xterm; do
             command -v "$c" >/dev/null 2>&1 && { term="$c"; break; }
         done
-        [[ -n "${term:-}" ]] || return 1
+        [[ -n "$term" ]] || { AK_TERM_ERROR="no terminal program found"; return 1; }
 
         printf -v cmd '%q ' "$@"
-        # Keep the window open after the program ends so its output stays readable.
+        # Keep it open after the program ends so its output stays readable.
         cmd="$cmd; echo; echo '-------------------------'; echo 'Process finished. Press Enter to close.'; read -r _"
 
         local launch=()
-        case "$term" in
-            gnome-terminal) launch=("$term" -- bash -c "$cmd") ;;
-            *)              launch=("$term" -e bash -c "$cmd") ;;
+        case "$how:$term" in
+            window:gnome-terminal) launch=(gnome-terminal --window -- bash -c "$cmd") ;;
+            tab:gnome-terminal)    launch=(gnome-terminal --tab -- bash -c "$cmd") ;;
+            window:mate-terminal)  launch=(mate-terminal --window -x bash -c "$cmd") ;;
+            tab:mate-terminal)     launch=(mate-terminal --tab -x bash -c "$cmd") ;;
+            window:xfce4-terminal) launch=(xfce4-terminal --window -x bash -c "$cmd") ;;
+            tab:xfce4-terminal)    launch=(xfce4-terminal --tab -x bash -c "$cmd") ;;
+            window:konsole)        launch=(konsole -e bash -c "$cmd") ;;
+            tab:konsole)           launch=(konsole --new-tab -e bash -c "$cmd") ;;
+            window:*)              launch=("$term" -e bash -c "$cmd") ;;
+            tab:*)                 AK_TERM_ERROR="$term can't open tabs"; return 1 ;;
         esac
 
-        if [[ ${EUID:-$(id -u)} -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
-            # Open the window in the user's desktop session, as the user.
-            uid=$(id -u "$SUDO_USER")
-            sudo -u "$SUDO_USER" -H env \
-                DISPLAY="${DISPLAY:-}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
-                XAUTHORITY="${XAUTHORITY:-$(_autokernel_user_home)/.Xauthority}" \
-                XDG_RUNTIME_DIR="/run/user/$uid" \
-                DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
-                "${launch[@]}" >/dev/null 2>&1 &
-        else
-            "${launch[@]}" >/dev/null 2>&1 &
+        errf="$(mktemp)"
+        autokernel_as_user "${AK_GUI_ENV[@]}" "${launch[@]}" >/dev/null 2>"$errf" &
+        pid=$!
+        # Most terminals hand the request to a running terminal server and exit
+        # at once; a non-zero exit means the window/tab was refused.
+        sleep 2
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid"; rc=$?
+            if (( rc != 0 )); then
+                AK_TERM_ERROR="$term failed: $(grep -v '^\s*$' "$errf" | tail -n 2 | tr '\n' ' ')"
+                rm -f "$errf"; return 1
+            fi
         fi
-        sleep 1
-        # A terminal that failed immediately (no session access) has already exited.
-        if ! kill -0 $! 2>/dev/null && ! wait $!; then return 1; fi
-        echo "Opened a new $term window."
+        rm -f "$errf"
+        echo "Opened a new $term $how."
         return 0
+    }
+
+    # Runs a model in the background with no window. Output goes to a log file
+    # and the process ID is kept so option 31 can show or stop it later.
+    autokernel_run_background() {
+        local kind="$1" launcher="$2" pick="$3" stack rundir logf pidf pid
+        stack="$(autokernel_ai_stack_in_use)"
+        rundir="$stack/run"; logf="$stack/logs/$kind.log"; pidf="$rundir/$kind.pid"
+        autokernel_as_user mkdir -p "$rundir" "$stack/logs"
+        if [[ -f "$pidf" ]] && kill -0 "$(cat "$pidf")" 2>/dev/null; then
+            echo "A $kind model is already running in the background (PID $(cat "$pidf"))."
+            echo "Stop it first with option 31 → 6."
+            return 1
+        fi
+        # setsid gives it its own session and process group, so closing this
+        # terminal doesn't stop it and it can be stopped as one group later.
+        # The child writes its own PID (= its process-group ID) to the PID file.
+        rm -f "$pidf"
+        autokernel_as_user setsid bash -c 'echo $$ > "$1"; exec nohup bash "$2" "$3"' _ \
+            "$pidf" "$launcher" "$pick" > "$logf" 2>&1 < /dev/null &
+        local i
+        for i in 1 2 3 4 5; do [[ -s "$pidf" ]] && break; sleep 1; done
+        pid="$(cat "$pidf" 2>/dev/null)"
+        autokernel_via_sudo && chown "$SUDO_USER": "$logf" 2>/dev/null
+        sleep 1
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "It stopped right away. Last lines of $logf:"
+            tail -n 8 "$logf" | sed 's/^/    /'
+            return 1
+        fi
+        echo "Running in the background (PID $pid)."
+        echo "Log: $logf"
+        echo "Watch it, or stop it, with option 31 → 6."
+    }
+
+    # Option 31 → 6: lists background models with their logs, and stops one.
+    autokernel_background_models() {
+        local stack k pidf pid any=0 n answer
+        stack="$(autokernel_ai_stack_in_use)"
+        echo "Background models:"
+        for k in text vision image; do
+            pidf="$stack/run/$k.pid"
+            if [[ -f "$pidf" ]] && kill -0 "$(cat "$pidf")" 2>/dev/null; then
+                printf '  %-7s running (PID %s)   log: %s\n' "$k" "$(cat "$pidf")" "$stack/logs/$k.log"
+                any=1
+            else
+                printf '  %-7s not running\n' "$k"
+                rm -f "$pidf" 2>/dev/null
+            fi
+        done
+        (( any )) || return 0
+        echo ""
+        echo "  l) Show the last lines of a log    s) Stop a model    Enter) Back"
+        read -p "Choice: " answer
+        case "$answer" in
+            [Ll]) read -p "Which (text/vision/image)? " n
+                  [[ -f "$stack/logs/$n.log" ]] && tail -n 25 "$stack/logs/$n.log" ;;
+            [Ss]) read -p "Which (text/vision/image)? " n
+                  pidf="$stack/run/$n.pid"
+                  if [[ -f "$pidf" ]]; then
+                      pid="$(cat "$pidf")"
+                      # The backend leads its own process group (see setsid
+                      # above); stop that group, which includes its workers.
+                      if [[ "$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" == "$pid" ]]; then
+                          kill -TERM -- "-$pid" 2>/dev/null
+                          sleep 3
+                          kill -0 "$pid" 2>/dev/null && kill -KILL -- "-$pid" 2>/dev/null
+                      else
+                          kill -TERM "$pid" 2>/dev/null
+                      fi
+                      rm -f "$pidf"
+                      echo "Stopped the $n model."
+                  else
+                      echo "No $n model is running in the background."
+                  fi ;;
+        esac
+    }
+
+    # ------------------------------------------------------------------------
+    # Add New Model (option 31). Based on orchestrator.sh's add_model_to_aidev
+    # (url= prompt, drag-and-drop quote stripping, .part downloads, never
+    # overwriting), extended for the three model kinds and for the extra files
+    # a model needs:
+    #   Hugging Face URLs (repo page, /tree/, /blob/ or /resolve/ links): the
+    #     repository's file list is read from the Hugging Face API, so the right
+    #     companion files are found automatically - all shards of a split GGUF,
+    #     or a vision model's config, tokenizer and preprocessor files.
+    #   Other URLs: the file is downloaded; for a vision model the same web
+    #     folder is probed for the companion files, and the URL of any required
+    #     file that still can't be found is asked for one by one.
+    #   Local paths: the file (or, for vision, its whole folder) is copied or moved.
+    # Usage: autokernel_add_model text|vision|image
+    # ------------------------------------------------------------------------
+    autokernel_human() { numfmt --to=iec --suffix=B "${1:-0}" 2>/dev/null || printf '%sB\n' "${1:-0}"; }
+
+    # Downloads URL to DEST (via DEST.part, resumable). Uses AK_HF_TOKEN if set.
+    autokernel_fetch() {
+        local url="$1" dest="$2" tmp="$2.part"
+        mkdir -p "$(dirname "$dest")" || return 1
+        echo "[Model] Downloading: ${dest##*/}"
+        if command -v curl >/dev/null 2>&1; then
+            curl -L --fail --retry 3 -C - --progress-bar \
+                ${AK_HF_TOKEN:+-H "Authorization: Bearer $AK_HF_TOKEN"} \
+                -o "$tmp" "$url" || { echo "[!] Download failed: $url"; return 1; }
+        elif command -v wget >/dev/null 2>&1; then
+            wget -c --show-progress ${AK_HF_TOKEN:+--header="Authorization: Bearer $AK_HF_TOKEN"} \
+                -O "$tmp" "$url" || { echo "[!] Download failed: $url"; return 1; }
+        else
+            echo "[!] Neither curl nor wget is available."; return 1
+        fi
+        mv -f -- "$tmp" "$dest"
+    }
+
+    # Quietly checks whether a URL exists (used to probe for companion files).
+    autokernel_url_exists() {
+        curl -sfIL ${AK_HF_TOKEN:+-H "Authorization: Bearer $AK_HF_TOKEN"} -o /dev/null "$1" 2>/dev/null
+    }
+
+    # Splits a Hugging Face model URL. Sets HF_REPO, HF_REV, HF_PATH, HF_IS_FILE.
+    autokernel_hf_parse() {
+        local url="${1%%[?#]*}" re='^https?://(www\.)?(huggingface\.co|hf\.co)/([^/]+/[^/]+)(/(blob|resolve|tree)/([^/]+)(/(.*))?)?/?$'
+        HF_REPO=""; HF_REV="main"; HF_PATH=""; HF_IS_FILE=0
+        [[ "$url" =~ $re ]] || return 1
+        HF_REPO="${BASH_REMATCH[3]}"
+        case "$HF_REPO" in datasets/*|spaces/*) return 1 ;; esac
+        [[ -n "${BASH_REMATCH[6]}" ]] && HF_REV="${BASH_REMATCH[6]}"
+        HF_PATH="${BASH_REMATCH[8]%/}"
+        [[ "${BASH_REMATCH[5]}" == blob || "${BASH_REMATCH[5]}" == resolve ]] && HF_IS_FILE=1
+        return 0
+    }
+
+    # Prints "size<TAB>path" for every file in the repository (all folders).
+    # Returns 2 when the repository is gated or private (a token is needed).
+    autokernel_hf_list() {
+        local api="https://huggingface.co/api/models/$HF_REPO/tree/$HF_REV?recursive=true" json code
+        json="$(mktemp)"
+        code=$(curl -sL -w '%{http_code}' ${AK_HF_TOKEN:+-H "Authorization: Bearer $AK_HF_TOKEN"} \
+               -o "$json" "$api" 2>/dev/null)
+        if [[ "$code" == 401 || "$code" == 403 ]]; then rm -f "$json"; return 2; fi
+        if [[ "$code" != 200 ]]; then rm -f "$json"; return 1; fi
+        python3 - "$json" <<'PY_AK_HF_TREE'
+import json, sys
+for e in json.load(open(sys.argv[1])):
+    if e.get("type") == "file":
+        size = (e.get("lfs") or {}).get("size", e.get("size", 0))
+        print(f"{size}\t{e['path']}")
+PY_AK_HF_TREE
+        local rc=$?
+        rm -f "$json"
+        return $rc
+    }
+
+    # Lists the repository, asking for a token if it is gated. Fills HF_FILES.
+    autokernel_hf_files() {
+        local rc tok out
+        HF_FILES=()
+        while :; do
+            out="$(autokernel_hf_list)"; rc=$?
+            if (( rc == 0 )); then
+                mapfile -t HF_FILES < <(printf '%s\n' "$out" | grep .)
+                return 0
+            fi
+            if (( rc == 2 )) && [[ -z "${AK_HF_TOKEN:-}" ]]; then
+                echo "[Model] $HF_REPO is gated or private. Accept its terms on huggingface.co,"
+                echo "        then paste an access token (huggingface.co/settings/tokens)."
+                read -r -s -p "Hugging Face token (Enter to cancel): " tok; echo
+                [[ -n "$tok" ]] || return 1
+                AK_HF_TOKEN="$tok"
+                continue
+            fi
+            echo "[!] Couldn't read the file list of $HF_REPO (revision $HF_REV)."
+            return 1
+        done
+    }
+
+    # Lets the user pick one "size<TAB>path" line. Sets AK_PICK to its path.
+    autokernel_pick_file() {
+        local prompt="$1"; shift
+        local items=("$@") i n
+        AK_PICK=""
+        (( ${#items[@]} )) || return 1
+        if (( ${#items[@]} == 1 )); then AK_PICK="${items[0]#*$'\t'}"; return 0; fi
+        echo "$prompt"
+        for i in "${!items[@]}"; do
+            printf '  %2d) %-60s %s\n' "$((i + 1))" "${items[$i]#*$'\t'}" "$(autokernel_human "${items[$i]%%$'\t'*}")"
+        done
+        read -r -p "Choice (1-${#items[@]}, Enter to cancel): " n
+        [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= ${#items[@]} )) || return 1
+        AK_PICK="${items[$((n - 1))]#*$'\t'}"
+    }
+
+    # Downloads a list of repository paths into DIR (keeping names, flattening
+    # the chosen folder), after showing the total and asking to confirm.
+    autokernel_hf_download_set() {
+        local dir="$1" base="$2"; shift 2
+        local lines=("$@") l p total=0 answer avail
+        for l in "${lines[@]}"; do total=$(( total + ${l%%$'\t'*} )); done
+        echo ""
+        echo "Will download ${#lines[@]} file(s), $(autokernel_human "$total"), into:"
+        echo "  $dir/"
+        for l in "${lines[@]}"; do printf '    %-56s %s\n' "${l#*$'\t'}" "$(autokernel_human "${l%%$'\t'*}")"; done
+        mkdir -p "$dir" || return 1
+        avail=$(df -PB1 "$dir" 2>/dev/null | awk 'NR==2 {print $4}')
+        if [[ -n "$avail" ]] && (( avail < total )); then
+            echo "[!] Only $(autokernel_human "$avail") free on that drive."
+        fi
+        read -r -p "Download now? [Y/n]: " answer
+        [[ "$answer" == [Nn]* ]] && return 1
+        for l in "${lines[@]}"; do
+            p="${l#*$'\t'}"
+            if [[ -e "$dir/${p#"$base"}" ]]; then echo "[Model] Already have ${p#"$base"}, skipping"; continue; fi
+            autokernel_fetch "https://huggingface.co/$HF_REPO/resolve/$HF_REV/$p" "$dir/${p#"$base"}" || return 1
+        done
+    }
+
+    # Copies or moves a local file or folder into the model library.
+    autokernel_import_local() {
+        local src="$1" dest="$2" answer stamp
+        if [[ "$(realpath "$src" 2>/dev/null)" == "$(realpath -m "$dest" 2>/dev/null)" ]]; then
+            echo "[Model] It's already in the model folder."; return 0
+        fi
+        if [[ -e "$dest" ]]; then
+            # Never overwrite an existing model.
+            stamp="$(date '+%Y%m%d_%H%M%S')"
+            if [[ -f "$src" && "${dest##*/}" == *.* ]]; then dest="${dest%.*}(Imported-$stamp).${dest##*.}"
+            else dest="$dest(Imported-$stamp)"; fi
+        fi
+        read -r -p "Copy (keeps the original) or move it? [C/m]: " answer
+        mkdir -p "$(dirname "$dest")" || return 1
+        if [[ "$answer" == [Mm]* ]]; then mv -- "$src" "$dest"; else cp -a -- "$src" "$dest"; fi || return 1
+        echo "[Model] Added: $dest"
+    }
+
+    autokernel_add_model() {
+        local kind="$1" stack models input fname dir name answer l p base
+        stack="$(autokernel_ai_stack_in_use)"
+        case "$kind" in
+            text)   models="$stack/models/text" ;;
+            vision) models="$stack/models/vision" ;;
+            image)  models="$stack/models/image" ;;
+            *) echo "Unknown model type: $kind"; return 1 ;;
+        esac
+        echo ""
+        echo "Add a $kind model. Enter a URL (a Hugging Face page or file link works best)"
+        echo "or a local path (drag and drop a file or folder into this window)."
+        case "$kind" in
+            text)   echo "  Needed: a .gguf file. Split GGUFs (-00001-of-0000N) are fetched in full." ;;
+            vision) echo "  Needed: a vision-language model folder (.safetensors + config/tokenizer/preprocessor files)." ;;
+            image)  echo "  Needed: a single-file Stable Diffusion checkpoint (.safetensors)." ;;
+        esac
+        read -r -p "url= " input
+        [[ -n "$input" ]] || return 0
+        input="${input%\"}"; input="${input#\"}"; input="${input%\'}"; input="${input#\'}"
+        input="${input%/}"
+
+        # ------------------------------------------------------- local path ---
+        if [[ ! "$input" =~ ^https?:// ]]; then
+            [[ -e "$input" ]] || { echo "[!] Not found: $input"; return 1; }
+            case "$kind" in
+                text)
+                    [[ -f "$input" && "$input" == *.gguf ]] || { echo "[!] Not a .gguf file: $input"; return 1; }
+                    autokernel_import_local "$input" "$models/${input##*/}" ;;
+                image)
+                    [[ -f "$input" && "$input" == *.safetensors ]] || { echo "[!] Not a .safetensors file: $input"; return 1; }
+                    autokernel_import_local "$input" "$models/${input##*/}" ;;
+                vision)
+                    [[ -f "$input" ]] && input="$(dirname "$input")"
+                    [[ -f "$input/config.json" ]] && compgen -G "$input/*.safetensors" >/dev/null \
+                        || { echo "[!] $input isn't a model folder (needs config.json and .safetensors files)."; return 1; }
+                    autokernel_import_local "$input" "$models/${input##*/}" || return 1
+                    autokernel_is_vlm "$models/${input##*/}/config.json" \
+                        || echo "[!] Note: that config.json doesn't look like a vision-language model."
+                    ;;
+            esac
+            return $?
+        fi
+
+        # ------------------------------------------------- Hugging Face URL ---
+        if autokernel_hf_parse "$input"; then
+            autokernel_hf_files || return 1
+            echo "[Model] $HF_REPO (revision $HF_REV): ${#HF_FILES[@]} files in the repository"
+            local cands=()
+            case "$kind" in
+                text)
+                    if (( HF_IS_FILE )) && [[ "$HF_PATH" == *.gguf ]]; then
+                        p="$HF_PATH"
+                    else
+                        mapfile -t cands < <(printf '%s\n' "${HF_FILES[@]}" | awk -F'\t' -v d="$HF_PATH" \
+                            'tolower($2) ~ /\.gguf$/ && tolower($2) !~ /mmproj/ && $2 !~ /-0000[2-9]-of-|-000[1-9][0-9]-of-/ && (d=="" || index($2, d"/")==1)')
+                        (( ${#cands[@]} )) || { echo "[!] No .gguf files found there."; return 1; }
+                        autokernel_pick_file "GGUF files (smaller = less memory, lower quality):" "${cands[@]}" || return 1
+                        p="$AK_PICK"
+                    fi
+                    # A split GGUF needs every part.
+                    if [[ "$p" =~ ^(.*)-[0-9]{5}-of-([0-9]{5})\.gguf$ ]]; then
+                        local prefix="${BASH_REMATCH[1]}" total="${BASH_REMATCH[2]}"
+                        mapfile -t cands < <(printf '%s\n' "${HF_FILES[@]}" | awk -F'\t' -v pre="$prefix" -v t="$total" \
+                            'index($2, pre"-")==1 && $2 ~ ("-[0-9][0-9][0-9][0-9][0-9]-of-" t "\\.gguf$")')
+                    else
+                        mapfile -t cands < <(printf '%s\n' "${HF_FILES[@]}" | awk -F'\t' -v p="$p" '$2==p')
+                    fi
+                    base="${p%/*}/"; [[ "$p" == */* ]] || base=""
+                    autokernel_hf_download_set "$models" "$base" "${cands[@]}" || return 1
+                    if printf '%s\n' "${HF_FILES[@]}" | grep -qi 'mmproj.*\.gguf$'; then
+                        echo "[Model] This repo also has an mmproj (vision projector) file. It isn't needed for text."
+                    fi
+                    ;;
+                vision)
+                    dir="$HF_PATH"
+                    (( HF_IS_FILE )) && { [[ "$dir" == */* ]] && dir="${dir%/*}" || dir=""; }
+                    # Every file in that folder except formats vLLM doesn't use.
+                    mapfile -t cands < <(printf '%s\n' "${HF_FILES[@]}" | awk -F'\t' -v d="$dir" '
+                        { rel = (d == "") ? $2 : (index($2, d"/")==1 ? substr($2, length(d)+2) : "") }
+                        rel != "" && rel !~ /\// && rel != ".gitattributes" &&
+                        tolower(rel) !~ /\.(gguf|onnx|pt|pth|ckpt|h5|msgpack|ot|tflite|mlmodel|zip|tar|gz|png|jpg|jpeg|gif|mp4)$/')
+                    printf '%s\n' "${cands[@]}" | awk -F'\t' '$2 ~ /(^|\/)config\.json$/ {f=1} END {exit !f}' \
+                        || { echo "[!] No config.json there: not a Hugging Face model folder."; return 1; }
+                    if printf '%s\n' "${cands[@]}" | grep -q '\.safetensors$'; then
+                        # Prefer .safetensors: skip the duplicate PyTorch .bin weights.
+                        mapfile -t cands < <(printf '%s\n' "${cands[@]}" | awk -F'\t' '$2 !~ /(^|\/)pytorch_model[^\/]*\.bin(\.index\.json)?$/')
+                    else
+                        echo "[!] No .safetensors weights there."; return 1
+                    fi
+                    name="${HF_REPO##*/}"
+                    [[ -n "$dir" ]] && name="$name-${dir//\//-}"
+                    base=""; [[ -n "$dir" ]] && base="$dir/"
+                    autokernel_hf_download_set "$models/$name" "$base" "${cands[@]}" || return 1
+                    autokernel_is_vlm "$models/$name/config.json" \
+                        || echo "[!] Note: that config.json doesn't look like a vision-language model; option 31 will warn about it."
+                    ;;
+                image)
+                    if (( HF_IS_FILE )) && [[ "$HF_PATH" == *.safetensors ]]; then
+                        p="$HF_PATH"
+                        if [[ "$p" == */* ]]; then
+                            echo "[!] ${p} is inside a subfolder: that is usually one part of a Diffusers"
+                            echo "    model, not a single-file checkpoint Forge can load."
+                            read -r -p "Download it anyway? [y/N]: " answer
+                            [[ "$answer" == [Yy]* ]] || return 1
+                        fi
+                    else
+                        mapfile -t cands < <(printf '%s\n' "${HF_FILES[@]}" | awk -F'\t' -v d="$HF_PATH" '
+                            { rel = (d == "") ? $2 : (index($2, d"/")==1 ? substr($2, length(d)+2) : "") }
+                            rel != "" && rel !~ /\// && tolower(rel) ~ /\.safetensors$/')
+                        if (( ${#cands[@]} == 0 )); then
+                            echo "[!] No single-file .safetensors checkpoint at that level."
+                            printf '%s\n' "${HF_FILES[@]}" | grep -q 'model_index.json' \
+                                && echo "    This is a Diffusers-format repository (split into unet/, vae/ ...). Look for a"
+                            echo "    repository or file that offers one combined .safetensors checkpoint."
+                            return 1
+                        fi
+                        autokernel_pick_file "Checkpoints:" "${cands[@]}" || return 1
+                        p="$AK_PICK"
+                    fi
+                    mapfile -t cands < <(printf '%s\n' "${HF_FILES[@]}" | awk -F'\t' -v p="$p" '$2==p')
+                    base="${p%/*}/"; [[ "$p" == */* ]] || base=""
+                    autokernel_hf_download_set "$models" "$base" "${cands[@]}" || return 1
+                    ;;
+            esac
+            [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]] && chown -R "$SUDO_USER": "$models" 2>/dev/null
+            echo "[Model] Done. Start it from option 31."
+            return 0
+        fi
+
+        # ------------------------------------------------------- other URL ---
+        local url="${input%%[?#]*}" tmpd got
+        fname="${url##*/}"
+        case "$kind" in
+            text)   [[ "$fname" == *.gguf ]] || fname="" ;;
+            *)      [[ "$fname" == *.safetensors ]] || fname="" ;;
+        esac
+        if [[ -z "$fname" ]]; then
+            # e.g. civitai.com/api/download/models/123: let the server name the file.
+            tmpd="$(mktemp -d "$models.dl.XXXXXX" 2>/dev/null || mktemp -d)"
+            echo "[Model] Downloading: $input"
+            ( cd "$tmpd" && curl -L --fail --retry 3 --progress-bar -J -O \
+                ${AK_HF_TOKEN:+-H "Authorization: Bearer $AK_HF_TOKEN"} "$input" ) \
+                || { echo "[!] Download failed."; rm -rf "$tmpd"; return 1; }
+            got="$(find "$tmpd" -maxdepth 1 -type f | head -n1)"
+            fname="${got##*/}"
+            echo "[Model] Server named the file: $fname"
+        fi
+        case "$kind" in
+            text|image)
+                local dest="$models/$fname"
+                [[ -e "$dest" ]] && dest="$models/${fname%.*}(Imported-$(date '+%Y%m%d_%H%M%S')).${fname##*.}"
+                if [[ -n "${got:-}" ]]; then mkdir -p "$models"; mv -- "$got" "$dest"; rm -rf "$tmpd"
+                else autokernel_fetch "$input" "$dest" || return 1; fi
+                echo "[Model] Added: $dest"
+                ;;
+            vision)
+                local web="${url%/*}" f need
+                name="${web##*/}"
+                read -r -p "Folder name for this model [$name]: " answer
+                name="${answer:-$name}"
+                dir="$models/$name"
+                if [[ -n "${got:-}" ]]; then mkdir -p "$dir"; mv -- "$got" "$dir/$fname"; rm -rf "$tmpd"
+                else autokernel_fetch "$input" "$dir/$fname" || return 1; fi
+                echo "[Model] Looking for the model's companion files next to it..."
+                for f in config.json model.safetensors.index.json generation_config.json \
+                         tokenizer.json tokenizer_config.json tokenizer.model special_tokens_map.json \
+                         vocab.json merges.txt added_tokens.json chat_template.json chat_template.jinja \
+                         preprocessor_config.json processor_config.json; do
+                    [[ -e "$dir/$f" ]] && continue
+                    autokernel_url_exists "$web/$f" && autokernel_fetch "$web/$f" "$dir/$f"
+                done
+                # Other weight shards named in the index.
+                if [[ -f "$dir/model.safetensors.index.json" ]]; then
+                    for f in $(grep -oE '"[^"]+\.safetensors"' "$dir/model.safetensors.index.json" | tr -d '"' | sort -u); do
+                        [[ -e "$dir/$f" ]] || autokernel_fetch "$web/$f" "$dir/$f" || return 1
+                    done
+                fi
+                # Files vLLM needs that weren't found: ask for each URL.
+                for need in config.json tokenizer_config.json preprocessor_config.json; do
+                    [[ -e "$dir/$need" ]] && continue
+                    echo "[!] Still missing: $need"
+                    read -r -p "URL for $need (Enter to skip): " answer
+                    [[ -n "$answer" ]] && autokernel_fetch "$answer" "$dir/$need"
+                done
+                [[ -f "$dir/config.json" ]] && { autokernel_is_vlm "$dir/config.json" \
+                    || echo "[!] Note: that config.json doesn't look like a vision-language model."; }
+                echo "[Model] Added folder: $dir"
+                ;;
+        esac
+        [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]] && chown -R "$SUDO_USER": "$models" 2>/dev/null
+        return 0
+    }
+
+    # What a Hugging Face config.json says the model is (first architecture,
+    # or the timm "architecture" field, or model_type).
+    autokernel_model_arch() {
+        local cfg="$1" a
+        a=$(tr -d '\n' < "$cfg" 2>/dev/null | grep -oE '"architectures"[[:space:]]*:[[:space:]]*\[[^]]*\]' \
+            | grep -oE '"[A-Za-z0-9_]+"' | sed -n '2p' | tr -d '"')
+        [[ -n "$a" ]] || a=$(grep -oE '"architecture"[[:space:]]*:[[:space:]]*"[^"]+"' "$cfg" 2>/dev/null | head -n1 | sed 's/.*: *"//; s/"$//')
+        [[ -n "$a" ]] || a=$(grep -oE '"model_type"[[:space:]]*:[[:space:]]*"[^"]+"' "$cfg" 2>/dev/null | head -n1 | sed 's/.*: *"//; s/"$//')
+        printf '%s\n' "${a:-unknown}"
+    }
+
+    # True when config.json looks like a model that takes images and writes text.
+    autokernel_is_vlm() {
+        local cfg="$1" flat
+        flat=$(tr -d '\n' < "$cfg" 2>/dev/null) || return 1
+        grep -qE '"architectures"' <<<"$flat" || return 1          # timm/backbone configs have none
+        grep -qE '"[A-Za-z0-9_]*(ForConditionalGeneration|ForCausalLM|ChatModel|VLModel|MiniCPMV|VisionText2Text)[A-Za-z0-9_]*"' <<<"$flat" || return 1
+        ! grep -qE '"(CLIPModel|SiglipModel|Siglip2Model|ViTModel|TimmWrapperModel)"|ForImageClassification' <<<"$flat"
     }
 
     autokernel_start_model() {
@@ -2448,6 +3166,16 @@ EOF_AK_VIRTUAL_AI
             echo "  File type:            $ext"
             echo "  Expected function:    $purpose"
             [[ -d $models ]] || echo "  (That folder doesn't exist yet: install the virtual AI drivers with option 23, Tier 6.)"
+            local add_now
+            echo ""
+            read -p "Add a $kind model now (download from a URL or import a file)? [y/N]: " add_now
+            if [[ "$add_now" == [Yy]* ]]; then
+                autokernel_add_model "$kind" || return 1
+                read -p "Start it now? [Y/n]: " add_now
+                [[ "$add_now" == [Nn]* ]] && return 0
+                autokernel_start_model "$kind"
+                return $?
+            fi
             return 1
         fi
         if [[ ! -x $launcher ]]; then
@@ -2463,21 +3191,48 @@ EOF_AK_VIRTUAL_AI
             read -p "Choice (1-${#found[@]}, default 1): " i
             if [[ $i =~ ^[0-9]+$ ]] && (( i >= 1 && i <= ${#found[@]} )); then pick="${found[$((i - 1))]}"; fi
         fi
+        # vLLM's image input needs a vision-LANGUAGE model (image in, text out).
+        # Image encoders (CLIP, SigLIP, timm/ViT backbones) and classifiers also
+        # come as safetensors folders, but can only output embeddings or labels.
+        if [[ $kind == vision ]] && ! autokernel_is_vlm "$pick/config.json"; then
+            echo "Wrong Model Type Detected: $(basename "$pick")"
+            echo "  Its config.json describes an image encoder/classifier ($(autokernel_model_arch "$pick/config.json")),"
+            echo "  not a vision-language model, so it can't describe images in text."
+            echo "  Expected: a vision-language model folder whose config.json lists an"
+            echo "  architecture such as ...ForConditionalGeneration (e.g. SmolVLM, Qwen2.5-VL, LLaVA)."
+            local anyway
+            read -p "Try to start it anyway? [y/N]: " anyway
+            [[ "$anyway" == [Yy]* ]] || return 1
+        fi
+
         local where
         echo ""
         echo "Run $(basename "$pick"):"
-        echo "  1) In a new terminal window (AutoKernel stays usable here)"
-        echo "  2) In this window (Ctrl+C stops it and returns to the menu)"
-        read -p "Choice (1-2, default 1): " where
-        if [[ "$where" != "2" ]]; then
-            # Under sudo, autokernel_open_terminal opens the window as the user.
-            if autokernel_open_terminal bash "$launcher" "$pick"; then
+        echo "  1) In a new terminal window"
+        echo "  2) In a new tab of the terminal"
+        echo "  3) In the background, no window (output goes to a log file)"
+        echo "  4) In this window (Ctrl+C stops it and returns to the menu)"
+        read -p "Choice (1-4, default 1): " where
+        where="${where:-1}"
+        if [[ "$where" == 1 || "$where" == 2 ]]; then
+            local how=window; [[ "$where" == 2 ]] && how=tab
+            if autokernel_open_terminal "$how" bash "$launcher" "$pick"; then
                 echo "$backend is starting there: http://127.0.0.1:$port"
-                echo "Close that window (or press Ctrl+C in it) to stop $backend."
+                echo "Close that $how (or press Ctrl+C in it) to stop $backend."
                 return 0
             fi
-            echo "Couldn't open a new terminal window (no desktop session or terminal found)."
-            echo "Running it in this window instead."
+            echo "Couldn't open a new terminal $how: $AK_TERM_ERROR"
+            if [[ "$how" == window ]] && autokernel_open_terminal tab bash "$launcher" "$pick"; then
+                echo "Opened it in a new tab instead: http://127.0.0.1:$port"
+                return 0
+            fi
+            read -p "Run it in the background (b) or in this window (w)? [B/w]: " where
+            [[ "$where" == [Ww]* ]] && where=4 || where=3
+        fi
+        if [[ "$where" == 3 ]]; then
+            autokernel_run_background "$kind" "$launcher" "$pick" || return 1
+            echo "$backend is starting at http://127.0.0.1:$port (it may take a minute to load)."
+            return 0
         fi
         echo "Starting $(basename "$pick")"
         echo "Press Ctrl+C to stop it and return to the menu."
@@ -2789,6 +3544,8 @@ EOF_AK_WIN
     fi
 
     export AUTOKERNEL_WORKSPACE
+    autokernel_record_baseline "$AUTOKERNEL_WORKSPACE"
+    autokernel_session_start "$AUTOKERNEL_WORKSPACE"
     AUTOKERNEL_INSTALL_JOURNAL="$AUTOKERNEL_WORKSPACE/.autokernel-install"
     export AUTOKERNEL_INSTALL_JOURNAL
     cd "$AUTOKERNEL_WORKSPACE" || {
@@ -2798,9 +3555,405 @@ EOF_AK_WIN
     autokernel_install_log "START" "SUCCESS" "$AUTOKERNEL_PATH" "$AUTOKERNEL_PATH"         "AutoKernel booted in workspace $AUTOKERNEL_WORKSPACE"
 }
 
+# ============================================================================
+# AUTOKERNEL -u : MOVE AUTOKERNEL AND EVERYTHING IT CREATED TO Trash(DeleteMe)
+# ============================================================================
+# Nothing is deleted. AutoKernel, and every file and folder it created in its
+# directory, are moved into a new folder there named Trash(DeleteMe), so a
+# fresh start can still recover anything worth keeping.
+#
+# Two lists in ~/.tmp keep track of this (one block per AutoKernel folder):
+#   .autokernel-baseline   what was already in the folder the first time
+#                          AutoKernel booted there; those entries are the
+#                          user's and stay put (unless the user chooses to
+#                          move them too).
+#   .autokernel-created    every top-level file and folder that appeared in
+#                          the folder WHILE AutoKernel was running. Its
+#                          sub-processes stay inside that structure (apart
+#                          from install-related changes elsewhere), so the
+#                          top level is enough to attribute everything, and
+#                          files the user adds while AutoKernel isn't
+#                          running are never mistaken for AutoKernel's.
+#   .autokernel-trashlist  what -u would move right now. Refreshed at boot,
+#                          every time the main menu is shown, and on exit.
+# 'AutoKernel -s' reports the size of everything -u would move.
+# Folders that booted before the baseline existed get their baseline on the
+# next boot, so items from those earlier runs show up as "already here" and
+# are offered separately.
+# ============================================================================
+AUTOKERNEL_TRASH_NAME='Trash(DeleteMe)'
+
+# The invoking user's home (also under sudo), where the two lists live.
+autokernel_state_home() {
+    local h=""
+    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]] && command -v getent >/dev/null 2>&1; then
+        h="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 | head -n1)"
+    fi
+    printf '%s\n' "${h:-${HOME:-$AUTOKERNEL_DIR}}"
+}
+AK_STATE_DIR="$(autokernel_state_home)/.tmp"
+AK_BASELINE="$AK_STATE_DIR/.autokernel-baseline"
+AK_TRASHLIST="$AK_STATE_DIR/.autokernel-trashlist"
+AK_CREATEDLIST="$AK_STATE_DIR/.autokernel-created"
+AK_SESSION_START=""          # entries present when this AutoKernel session began
+
+# Names AutoKernel itself writes into its folder (installer, journal, generators).
+AK_KNOWN_ENTRIES=$'.autokernel-install\n.autokernel-baseline\nLaunchAutoKernel.sh\nLaunchAutoKernel.command\nLaunchAutoKernel.cmd\nDriverTools'
+
+
+_autokernel_state_file_init() {
+    local f="$1" title="$2"
+    mkdir -p "$AK_STATE_DIR" 2>/dev/null || return 1
+    if [[ ! -f "$f" ]]; then
+        {
+            echo "# $title"
+            echo "# Format: '@DIR<TAB>folder<TAB>date' starts a folder's block; each"
+            echo "# following 'folder<TAB>entry' line names one top-level entry in it."
+        } > "$f" 2>/dev/null || return 1
+    fi
+    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+        chown "$SUDO_USER": "$AK_STATE_DIR" "$f" 2>/dev/null || true
+    fi
+}
+
+# Top-level entries of a folder, one per line (dotfiles included).
+_autokernel_list_entries() {
+    local dir="$1" e
+    for e in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+        [[ -e "$e" || -L "$e" ]] || continue
+        e="${e##*/}"
+        [[ "$e" == "$AUTOKERNEL_TRASH_NAME" || "$e" == .autokernel-write-test.* ]] && continue
+        printf '%s\n' "$e"
+    done
+}
+
+_autokernel_has_baseline() { [[ -f "$AK_BASELINE" ]] && grep -qF -- "@DIR"$'\t'"$1"$'\t' "$AK_BASELINE"; }
+_autokernel_has_created_block() { [[ -f "$AK_CREATEDLIST" ]] && grep -qF -- "@DIR"$'\t'"$1"$'\t' "$AK_CREATEDLIST"; }
+
+# Starts tracking for this session: remembers what is in the folder now, so
+# anything that appears later in the session is known to be AutoKernel's.
+autokernel_session_start() {
+    local dir="$1" e
+    _autokernel_state_file_init "$AK_CREATEDLIST" \
+        "AutoKernel created list: top-level files and folders that appeared in each folder while AutoKernel was running." || return 0
+    if ! _autokernel_has_created_block "$dir"; then
+        {
+            printf '@DIR\t%s\t%s\n' "$dir" "$(date '+%Y-%m-%d %H:%M:%S')"
+            # Folders that already had a baseline before this list existed: what
+            # was attributed to AutoKernel by the baseline then is carried over.
+            if _autokernel_has_baseline "$dir"; then
+                _autokernel_list_entries "$dir" | while IFS= read -r e; do
+                    grep -qxF -- "$dir"$'\t'"$e" "$AK_BASELINE" && continue
+                    [[ "$dir/$e" -ef "$AUTOKERNEL_PATH" ]] && continue
+                    printf '%s\t%s\n' "$dir" "$e"
+                done
+            fi
+        } >> "$AK_CREATEDLIST"
+    fi
+    AK_SESSION_START="$(_autokernel_list_entries "$dir")"
+    AK_SESSION_DIR="$dir"
+}
+
+# Appends entries that appeared since the session started to the created list.
+autokernel_track_created() {
+    local dir="${1:-${AK_SESSION_DIR:-}}" e
+    [[ -n "$dir" && "$dir" == "${AK_SESSION_DIR:-}" && -f "$AK_CREATEDLIST" ]] || return 0
+    while IFS= read -r e; do
+        [[ -n "$e" ]] || continue
+        grep -qxF -- "$e" <<<"$AK_SESSION_START" && continue
+        grep -qxF -- "$dir"$'\t'"$e" "$AK_CREATEDLIST" && continue
+        grep -qxF -- "$dir"$'\t'"$e" "$AK_BASELINE" 2>/dev/null && continue
+        printf '%s\t%s\n' "$dir" "$e" >> "$AK_CREATEDLIST"
+    done < <(_autokernel_list_entries "$dir")
+}
+
+autokernel_record_baseline() {
+    local dir="$1" e old="$1/.autokernel-baseline"
+    _autokernel_state_file_init "$AK_BASELINE" \
+        "AutoKernel baseline: entries that were in each folder before AutoKernel first booted there. 'AutoKernel -u' leaves these in place." || return 0
+    _autokernel_has_baseline "$dir" && { autokernel_refresh_trashlist "$dir"; return 0; }
+    {
+        printf '@DIR\t%s\t%s\n' "$dir" "$(date '+%Y-%m-%d %H:%M:%S')"
+        if [[ -f "$old" ]]; then
+            # Migrate a baseline an earlier AutoKernel kept inside the folder.
+            grep -v '^#' "$old" | while IFS= read -r e; do [[ -n "$e" ]] && printf '%s\t%s\n' "$dir" "$e"; done
+        else
+            _autokernel_list_entries "$dir" | while IFS= read -r e; do
+                [[ "$dir/$e" -ef "$AUTOKERNEL_PATH" ]] && continue
+                printf '%s\t%s\n' "$dir" "$e"
+            done
+        fi
+    } >> "$AK_BASELINE"
+    rm -f "$old" 2>/dev/null || true
+    autokernel_refresh_trashlist "$dir"
+}
+
+# Sorts a folder's entries into AK_CREATED (AutoKernel's) and AK_KEPT (user's),
+# and puts AutoKernel's desktop launcher, if it points into the folder, in AK_OUTSIDE.
+# AK_OTHER holds entries that are in neither list (added while AutoKernel wasn't
+# running, or left by a run from before the lists existed).
+_autokernel_classify() {
+    local dir="$1" e desk
+    AK_CREATED=(); AK_KEPT=(); AK_OTHER=(); AK_OUTSIDE=()
+    while IFS= read -r e; do
+        if [[ "$dir/$e" -ef "$AUTOKERNEL_PATH" ]] || grep -qxF -- "$e" <<<"$AK_KNOWN_ENTRIES" \
+           || { [[ -f "$AK_CREATEDLIST" ]] && grep -qxF -- "$dir"$'\t'"$e" "$AK_CREATEDLIST"; }; then
+            AK_CREATED+=("$e")
+        elif [[ -f "$AK_BASELINE" ]] && grep -qxF -- "$dir"$'\t'"$e" "$AK_BASELINE"; then
+            AK_KEPT+=("$e")
+        else
+            AK_OTHER+=("$e")
+        fi
+    done < <(_autokernel_list_entries "$dir")
+    desk="$(autokernel_state_home)/.local/share/applications/AutoKernel.desktop"
+    if [[ -f "$desk" ]] && grep -qF "Exec=$dir/" "$desk"; then AK_OUTSIDE+=("$desk"); fi
+}
+
+# Rewrites this folder's block in ~/.tmp/.autokernel-trashlist.
+autokernel_refresh_trashlist() {
+    local dir="$1" e tmp
+    _autokernel_state_file_init "$AK_TRASHLIST" \
+        "AutoKernel trash list: what 'AutoKernel -u' would move to $AUTOKERNEL_TRASH_NAME right now (refreshed at boot, at every main menu and on exit)." || return 0
+    autokernel_track_created "$dir"
+    _autokernel_classify "$dir"
+    tmp="$AK_TRASHLIST.$$"
+    {
+        awk -F'\t' -v d="$dir" '!(($1=="@DIR" && $2==d) || $1==d)' "$AK_TRASHLIST"
+        printf '@DIR\t%s\t%s\n' "$dir" "$(date '+%Y-%m-%d %H:%M:%S')"
+        for e in "${AK_CREATED[@]}"; do printf '%s\t%s\n' "$dir" "$e"; done
+        for e in "${AK_OUTSIDE[@]}"; do printf '%s\t%s\n' "$dir" "$e"; done
+    } > "$tmp" 2>/dev/null && mv -f "$tmp" "$AK_TRASHLIST" 2>/dev/null || rm -f "$tmp"
+    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+        chown "$SUDO_USER": "$AK_TRASHLIST" 2>/dev/null || true
+    fi
+}
+
+autokernel_self_trash() {
+    local dir="$AUTOKERNEL_DIR" trash stamp e answer since
+
+    if ! : > "$dir/.autokernel-write-test.$$" 2>/dev/null; then
+        echo "[AutoKernel] $dir is read-only; nothing can be moved there."
+        echo "[AutoKernel] Run -u on the installed or workspace copy instead."
+        return 1
+    fi
+    rm -f "$dir/.autokernel-write-test.$$"
+
+    # Pick up an in-folder baseline left by an earlier AutoKernel, if any.
+    if [[ -f "$dir/.autokernel-baseline" ]] && ! _autokernel_has_baseline "$dir"; then
+        autokernel_record_baseline "$dir"
+    fi
+    _autokernel_classify "$dir"
+    autokernel_refresh_trashlist "$dir"
+
+    echo "======================================================================="
+    echo "                 AutoKernel -u : move to $AUTOKERNEL_TRASH_NAME"
+    echo "======================================================================="
+    echo "Folder: $dir"
+    echo "Lists:  $AK_BASELINE"
+    echo "        $AK_CREATEDLIST"
+    echo "        $AK_TRASHLIST"
+    echo ""
+    echo "Created by AutoKernel (will be moved):"
+    for e in "${AK_CREATED[@]}"; do echo "    $e"; done
+    for e in "${AK_OUTSIDE[@]}"; do echo "    $e  (launcher)"; done
+    if (( ${#AK_KEPT[@]} )); then
+        echo ""
+        since="$(awk -F'\t' -v d="$dir" '$1=="@DIR" && $2==d {print $3; exit}' "$AK_BASELINE")"
+        echo "Already here before AutoKernel first booted in this folder ($since),"
+        echo "always kept in place:"
+        for e in "${AK_KEPT[@]}"; do echo "    $e"; done
+    fi
+    if (( ${#AK_OTHER[@]} )); then
+        echo ""
+        echo "Not recorded as AutoKernel's (added while it wasn't running, or left by a"
+        echo "run from before tracking existed). Kept in place unless you choose to move them:"
+        for e in "${AK_OTHER[@]}"; do echo "    $e"; done
+    fi
+    echo ""
+    echo "Nothing is deleted. System-wide changes are NOT undone by this: drivers,"
+    echo "kernel headers and their ~/.tmp logs. Use option 24 (Uninstall driver)"
+    echo "first if you want those removed too."
+    echo ""
+    local move_kept=0
+    if (( ${#AK_OTHER[@]} )); then
+        read -r -p "Also move the unrecorded items? [y/N]: " answer
+        [[ "$answer" == [Yy]* ]] && move_kept=1
+    fi
+    read -r -p "Move these into $dir/$AUTOKERNEL_TRASH_NAME now? [y/N]: " answer
+    [[ "$answer" == [Yy]* ]] || { echo "Cancelled. Nothing was moved."; return 0; }
+
+    stamp="$(date '+%Y-%m-%d_%H-%M-%S')"
+    trash="$dir/$AUTOKERNEL_TRASH_NAME/$stamp"
+    mkdir -p "$trash" || { echo "Could not create $trash"; return 1; }
+
+    local failed=0
+    for e in "${AK_CREATED[@]}"; do mv -- "$dir/$e" "$trash/" || failed=1; done
+    if (( move_kept )); then
+        for e in "${AK_OTHER[@]}"; do mv -- "$dir/$e" "$trash/" || failed=1; done
+    fi
+    if (( ${#AK_OUTSIDE[@]} )); then
+        mkdir -p "$trash/_outside"
+        for e in "${AK_OUTSIDE[@]}"; do
+            mv -- "$e" "$trash/_outside/" || failed=1
+            printf '%s\n' "$e" >> "$trash/_outside/ORIGINAL-LOCATIONS.txt"
+        done
+    fi
+    # Keep a copy of both lists with the trash, then retire this folder's
+    # blocks so a fresh AutoKernel here starts a new baseline.
+    for e in "$AK_BASELINE" "$AK_CREATEDLIST" "$AK_TRASHLIST"; do
+        [[ -f "$e" ]] || continue
+        awk -F'\t' -v d="$dir" '($1=="@DIR" && $2==d) || $1==d' "$e" > "$trash/${e##*/}.txt"
+        awk -F'\t' -v d="$dir" '!(($1=="@DIR" && $2==d) || $1==d)' "$e" > "$e.$$" && mv -f "$e.$$" "$e"
+    done
+    {
+        echo "Moved by 'AutoKernel -u' on $(date '+%Y-%m-%d %H:%M:%S') from: $dir"
+        echo "To restore an item, move it from this folder back to $dir"
+        echo "(launchers: see _outside/ORIGINAL-LOCATIONS.txt)."
+        echo ".autokernel-baseline.txt / .autokernel-created.txt / .autokernel-trashlist.txt"
+        echo "are the lists that were used."
+    } > "$trash/README.txt"
+    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+        chown -R "$SUDO_USER": "$dir/$AUTOKERNEL_TRASH_NAME" 2>/dev/null || true
+    fi
+
+    echo ""
+    if (( failed )); then
+        echo "[AutoKernel] Some items could not be moved (see messages above)."
+    fi
+    echo "[AutoKernel] Moved to: $trash"
+    echo "[AutoKernel] To start fresh, put a new AutoKernel.sh in $dir and run it,"
+    echo "[AutoKernel] or bring this copy back with:"
+    printf '[AutoKernel]   %q -r\n' "$trash/$(basename "$AUTOKERNEL_PATH")"
+    return $failed
+}
+
+# 'AutoKernel -s': size of everything -u would move, without moving anything.
+autokernel_trash_size() {
+    local dir="$AUTOKERNEL_DIR" e paths=()
+    _autokernel_classify "$dir"
+    [[ -w "$dir" ]] && autokernel_refresh_trashlist "$dir"
+    echo "======================================================================="
+    echo "            AutoKernel -s : size of what -u would move"
+    echo "======================================================================="
+    echo "Folder: $dir"
+    echo ""
+    echo "Created by AutoKernel:"
+    for e in "${AK_CREATED[@]}"; do paths+=("$dir/$e"); done
+    paths+=("${AK_OUTSIDE[@]}")
+    if (( ${#paths[@]} )); then
+        du -sh -- "${paths[@]}" 2>/dev/null | sed "s#$dir/##; s#^#    #"
+        echo "    ----"
+        du -csh -- "${paths[@]}" 2>/dev/null | tail -n1 | sed 's/\ttotal$/\tTOTAL that -u would move/; s/^/    /'
+    else
+        echo "    (nothing)"
+    fi
+    if (( ${#AK_OTHER[@]} )); then
+        paths=(); for e in "${AK_OTHER[@]}"; do paths+=("$dir/$e"); done
+        echo ""
+        echo "Not recorded as AutoKernel's (only moved if you choose to on -u):"
+        du -sh -- "${paths[@]}" 2>/dev/null | sed "s#$dir/##; s#^#    #"
+        du -csh -- "${paths[@]}" 2>/dev/null | tail -n1 | sed 's/^/    /'
+    fi
+    if (( ${#AK_KEPT[@]} )); then
+        echo ""
+        echo "Your pre-existing items (${#AK_KEPT[@]}) are never moved and aren't counted."
+    fi
+}
+
+# 'AutoKernel -r' (run on a copy inside Trash(DeleteMe)/<date>/): copies this
+# AutoKernel back to the folder above Trash(DeleteMe), so a fresh start doesn't
+# need the paths typed out. Its launcher is offered back too. Everything else
+# stays in the trash; option 23 tier 6 imports the previous AI stack from there.
+autokernel_restore_self() {
+    local here="$AUTOKERNEL_DIR" trash target name dest answer launch_src orig
+    trash="$(dirname "$here")"
+    if [[ "$(basename "$trash")" != "$AUTOKERNEL_TRASH_NAME" ]]; then
+        echo "[AutoKernel] -r restores a copy that 'AutoKernel -u' moved into $AUTOKERNEL_TRASH_NAME."
+        echo "[AutoKernel] This AutoKernel isn't in one: $here"
+        if [[ -d "$here/$AUTOKERNEL_TRASH_NAME" ]]; then
+            echo "[AutoKernel] Copies in this folder's trash:"
+            find "$here/$AUTOKERNEL_TRASH_NAME" -mindepth 2 -maxdepth 2 -type f -name 'AutoKernel*' \
+                ! -name '*.txt' 2>/dev/null | sort -r | while IFS= read -r name; do
+                    printf '    %q -r\n' "$name"
+                done
+        fi
+        return 1
+    fi
+    target="$(dirname "$trash")"
+    name="$(basename "$AUTOKERNEL_PATH")"
+    dest="$target/$name"
+
+    echo "======================================================================="
+    echo "             AutoKernel -r : restore from $AUTOKERNEL_TRASH_NAME"
+    echo "======================================================================="
+    echo "From: $AUTOKERNEL_PATH"
+    echo "To:   $dest"
+    if [[ -e "$dest" ]]; then
+        if cmp -s "$AUTOKERNEL_PATH" "$dest"; then
+            echo "An identical AutoKernel is already there; nothing to copy."
+        else
+            read -r -p "$dest already exists (a different version). Replace it? [y/N]: " answer
+            if [[ "$answer" == [Yy]* ]]; then
+                cp -p -- "$AUTOKERNEL_PATH" "$dest" || { echo "Copy failed."; return 1; }
+                echo "Replaced."
+            else
+                echo "Kept the existing $dest."
+            fi
+        fi
+    else
+        cp -p -- "$AUTOKERNEL_PATH" "$dest" || { echo "Copy failed."; return 1; }
+        echo "Copied. (The trash copy stays where it is, as a backup.)"
+    fi
+    chmod +x "$dest" 2>/dev/null || true
+
+    # Desktop launcher that -u moved out of ~/.local/share/applications.
+    if [[ -f "$here/_outside/ORIGINAL-LOCATIONS.txt" ]]; then
+        local origs=()
+        while IFS= read -r orig; do [[ -n "$orig" ]] && origs+=("$orig"); done < "$here/_outside/ORIGINAL-LOCATIONS.txt"
+        for orig in "${origs[@]}"; do
+            launch_src="$here/_outside/$(basename "$orig")"
+            [[ -f "$launch_src" && ! -e "$orig" ]] || continue
+            read -r -p "Restore the launcher $orig too? [Y/n]: " answer
+            [[ "$answer" == [Nn]* ]] && continue
+            mkdir -p "$(dirname "$orig")" && cp -p -- "$launch_src" "$orig" && echo "Restored $orig"
+        done
+    fi
+    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+        chown "$SUDO_USER": "$dest" 2>/dev/null || true
+    fi
+
+    echo ""
+    echo "Other files from that clean-up stay in: $here"
+    echo "(Option 23, tier 6 offers to import the previous AI stack from there.)"
+    echo ""
+    read -r -p "Start the restored AutoKernel now? [Y/n]: " answer
+    if [[ "$answer" == [Nn]* ]]; then
+        printf 'Start it later with:\n    cd %q && ./%q\n' "$target" "$name"
+        return 0
+    fi
+    cd "$target" || return 1
+    exec "$dest"
+}
+
+case "${1:-}" in
+    -u|--uninstall) autokernel_self_trash; exit $? ;;
+    -s|--size)      autokernel_trash_size; exit $? ;;
+    -r|--restore)   autokernel_restore_self; exit $? ;;
+    -h|--help)
+        echo "Usage: $(basename "$AUTOKERNEL_PATH") [option]"
+        echo "  (none)  Start AutoKernel"
+        echo "  <N>     Start AutoKernel and run main-menu option N"
+        echo "  -s      Show the size of everything -u would move"
+        echo "  -u      Move AutoKernel and everything it created into $AUTOKERNEL_TRASH_NAME"
+        echo "  -r      Run on a copy in $AUTOKERNEL_TRASH_NAME: restore it to the folder above"
+        exit 0 ;;
+esac
+
 # Run once at boot.  The selected TARGET_OS/OS_SEC and resulting workspace
 # become the inherited environment for the rest of AutoKernel and its children.
 OS_Selector "$@"
+# Record anything created since the last main menu when AutoKernel exits.
+trap 'autokernel_refresh_trashlist "$AUTOKERNEL_WORKSPACE" 2>/dev/null || true' EXIT
 
 # ============================================================================
 # AUTOKERNEL SELF UPDATE
@@ -37282,6 +38435,7 @@ while true; do
         option="$AUTOKERNEL_INITIAL_OPTION"
         AUTOKERNEL_INITIAL_OPTION=""
     else
+        autokernel_refresh_trashlist "$AUTOKERNEL_WORKSPACE" 2>/dev/null || true
         show_menu
         read -r option
     fi
@@ -37397,7 +38551,7 @@ while true; do
 
         # Temporary execution directory plus persistent user-owned example library.
         TEMP_DIR=$(mktemp -d)
-        trap "rm -rf $TEMP_DIR" EXIT
+        trap "rm -rf $TEMP_DIR; autokernel_refresh_trashlist \"\$AUTOKERNEL_WORKSPACE\" 2>/dev/null || true" EXIT
         HELLO_WORLD_LIBRARY="${HELLO_WORLD_LIBRARY:-${DEV_KERNEL}/HelloWorld}"
         autokernel_seed_train_toggle "$HELLO_WORLD_LIBRARY"
         autokernel_register_interpreter_dir "$HELLO_WORLD_LIBRARY" "HELLO_WORLD"
@@ -39548,10 +40702,12 @@ EOF
         echo "2) Start Vision Model   (image input,  vLLM,  models/vision/<model-name>/)"
         echo "3) Start Text Model     (text in/out,  llama.cpp, models/text/*.gguf)"
         echo "4) Start Image Model    (image output, Forge, models/image/*.safetensors)"
+        echo "5) Add New Model        (download from a URL, or import a local file/folder)"
+        echo "6) Background Models    (see what's running, view logs, stop)"
         echo ""
         echo "AI models are read from: $(autokernel_ai_stack_in_use)/models"
         echo ""
-        read -p "Choice (1-4): " test_run_choice
+        read -p "Choice (1-6): " test_run_choice
 
         case "$test_run_choice" in
             1)
@@ -39606,6 +40762,20 @@ EOF
             2) autokernel_start_model vision ;;
             3) autokernel_start_model text ;;
             4) autokernel_start_model image ;;
+            6) autokernel_background_models ;;
+            5)
+                echo "Which kind of model?"
+                echo "  1) Text   (.gguf, llama.cpp)"
+                echo "  2) Vision (vision-language model folder, vLLM)"
+                echo "  3) Image  (.safetensors checkpoint, Forge)"
+                read -p "Choice (1-3): " add_kind
+                case "$add_kind" in
+                    1) autokernel_add_model text ;;
+                    2) autokernel_add_model vision ;;
+                    3) autokernel_add_model image ;;
+                    *) echo "Invalid choice." ;;
+                esac
+                ;;
             *) echo "Invalid choice." ;;
         esac
         echo ""
